@@ -1,0 +1,3 @@
+interface:
+  display_name: "Video Ingest"
+  short_description: "取证式视频取材：字幕/ASR 全文、覆盖校验与可追溯总结"

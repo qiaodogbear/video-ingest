@@ -1,0 +1,38 @@
+# 凭证与隐私：绝不入库
+.env
+*.cookies
+cookies.txt
+*_cookies.txt
+.secrets/
+
+# 任务产物（含下载的音视频与转录）
+output/
+.video_ingest_cache/
+
+# 本地模型缓存（隔离用，避免污染用户级 HF 缓存）
+.hf-cache/
+
+# 运行环境与构建产物
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# pytest 的 tmp_path 基准目录（Windows 下会落在仓库根）
+pytest-of-*/
+pytest-of-Administrator/
+
+# 发布/分享产物
+dist-share/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
