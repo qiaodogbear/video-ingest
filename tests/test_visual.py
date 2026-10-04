@@ -11,13 +11,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from video_ingest.visual import (  # noqa: E402
     HIGH_CHANGE_VAR,
+    _uniform_indices,
     build_exposure_runs,
     choose_sample_time,
     classify_sig,
@@ -25,6 +25,31 @@ from video_ingest.visual import (  # noqa: E402
     plan_frames,
     sample_status,
 )
+
+
+class ConstSig:
+    """常量"指纹"替身，避免测试依赖 numpy。
+
+    只需支持 build_exposure_runs 实际用到的运算：
+    逐元素相减、取绝对值、求均值，以及段内方差统计。
+    """
+
+    def __init__(self, value: float, shape: tuple[int, int] = (4, 4)):
+        self.value = float(value)
+        self.shape = shape
+        self._n = shape[0] * shape[1]
+
+    def __sub__(self, other):
+        return ConstSig(self.value - other.value, self.shape)
+
+    def abs(self):
+        return ConstSig(abs(self.value), self.shape)
+
+    def mean(self):
+        return self.value
+
+    def std(self, axis=None):
+        return ConstSig(0.0, self.shape)
 
 
 def make_samples(spec, *, interval=0.4, threshold=6.0):
@@ -35,8 +60,8 @@ def make_samples(spec, *, interval=0.4, threshold=6.0):
     samples = []
     prev = None
     for t, val, kind in spec:
-        sig = np.full((4, 4), float(val), dtype=np.float32)
-        diff = float(np.abs(sig - prev).mean()) if prev is not None else 0.0
+        sig = ConstSig(val)
+        diff = float((sig - prev).abs().mean()) if prev is not None else 0.0
         samples.append({
             "t": t, "diff": round(diff, 2), "changed": bool(diff >= threshold),
             "kind": kind, "sig": sig,
@@ -350,6 +375,72 @@ def test_plan_max_frames_uniformly_thins_not_truncates():
     plan = plan_frames(segments, {"runs": runs}, max_frames=4)
     assert plan["unique_frame_count"] == 4
     assert plan["truncated_by_max_frames"] == 6
+
+
+# --------------------------------------------------------------------------
+# 均匀抽稀（纯 Python，不依赖 numpy）
+# --------------------------------------------------------------------------
+
+def test_uniform_indices_includes_both_ends():
+    """抽稀必须包含首尾，否则时间轴后半段会完全没有画面证据。"""
+    idx = _uniform_indices(10, 4)
+    assert idx[0] == 0
+    assert idx[-1] == 9
+    assert len(idx) == 4
+
+
+def test_uniform_indices_is_sorted_and_in_range():
+    idx = _uniform_indices(100, 7)
+    assert idx == sorted(idx)
+    assert all(0 <= i < 100 for i in idx)
+
+
+def test_uniform_indices_returns_all_when_count_exceeds_total():
+    assert _uniform_indices(3, 10) == [0, 1, 2]
+    assert _uniform_indices(3, 3) == [0, 1, 2]
+
+
+def test_uniform_indices_single_request():
+    assert _uniform_indices(50, 1) == [0]
+
+
+def test_uniform_indices_degenerate_inputs():
+    assert _uniform_indices(0, 5) == []
+    assert _uniform_indices(5, 0) == []
+    assert _uniform_indices(-1, 3) == []
+
+
+def test_uniform_indices_tiny_total_allows_duplicates():
+    """total 很小时允许重复下标（宁可少抽也不能越界）。"""
+    idx = _uniform_indices(2, 5)
+    assert idx[0] == 0 and idx[-1] == 1
+    assert all(0 <= i < 2 for i in idx)
+
+
+# --------------------------------------------------------------------------
+# 纯 Python 段内离散度
+# --------------------------------------------------------------------------
+
+def test_variance_of_plain_handles_uniform_values():
+    from video_ingest.visual import _variance_of_plain
+
+    sigs = [ConstSig(40) for _ in range(4)]
+    assert _variance_of_plain(sigs) == 0.0
+
+
+def test_variance_of_plain_detects_oscillation():
+    from video_ingest.visual import _variance_of_plain
+
+    sigs = [ConstSig(0 if i % 2 == 0 else 200) for i in range(8)]
+    # 0/200 交替 → 逐点标准差 100
+    assert _variance_of_plain(sigs) > 90
+
+
+def test_variance_of_plain_single_sample():
+    from video_ingest.visual import _variance_of_plain
+
+    assert _variance_of_plain([ConstSig(10)]) == 0.0
+    assert _variance_of_plain([]) == 0.0
 
 
 def test_plan_handles_segment_without_any_run():

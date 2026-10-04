@@ -14,7 +14,7 @@
 |---|---|---|
 | CLI 工具 | `video_ingest/`（本仓库内） | 已验证 |
 | 命令行入口 | `video_ingest/cli.py`，控制台脚本 `video-ingest` | 已验证 |
-| 单元测试 | `tests/`（148 项） | 已验证（`148 passed`） |
+| 单元测试 | `tests/`（157 项） | 已验证（`157 passed`） |
 | 静态检查 | `ruff --select F,E9,B,C4,RET` | 已验证（全绿） |
 | SOP 文档 | [SOP.md](SOP.md) | 已验证 |
 | Skill | `skill/video-ingest/` | 已验证（官方校验器通过） |
@@ -167,7 +167,7 @@ note: 警示：指定语言 zh，但 ASR 检测到语音为 en…识别的**内�
 |---|---|
 | 解压后在独立目录、独立 venv 安装 | 通过 |
 | 从项目目录外执行 `doctor` | `ok: true`（不再依赖 cwd） |
-| 接收者跑测试 | `148 passed` |
+| 接收者跑测试 | `157 passed` |
 | 打包安全扫描 | 凭证值 / 本机绝对路径 / 多媒体 三项全绿 |
 
 ### 3.8 单元测试覆盖的关键约束

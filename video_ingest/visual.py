@@ -25,7 +25,9 @@ import zlib
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+# numpy 只在需要它的函数内部导入。
+# 效果：曝光段分割、区间求交、取样规划、状态判定这些纯逻辑不依赖任何
+# 第三方库，测试可在最小环境运行（CI 因此不必安装 GB 级依赖）。
 
 # 指纹尺寸：只用于变化检测与粗略分类，不用于读取文字
 SIG_W, SIG_H = 64, 36
@@ -244,12 +246,74 @@ def build_exposure_runs(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _variance_of(sigs: list[Any]) -> float:
-    import numpy as np
+    """段内指纹的离散程度（逐点标准差再取均值）。
 
+    优先用 numpy（真实指纹是 ndarray）；对不支持的输入回退到纯 Python，
+    使该判据在无 numpy 的环境里仍可测。
+    """
     if len(sigs) < 2:
         return 0.0
-    arr = np.stack(sigs)
-    return float(arr.std(axis=0).mean())
+    try:
+        import numpy as np
+
+        arr = np.stack(sigs)
+        return float(arr.std(axis=0).mean())
+    except Exception:  # noqa: BLE001
+        return _variance_of_plain(sigs)
+
+
+def _variance_of_plain(sigs: list[Any]) -> float:
+    """纯 Python 版本的段内离散度，支持 (rows, cols) 形状或标量序列。
+
+    sigs 若为实现了 shape/取值协议的对象，这里按其 shape 展开取值。
+    """
+    values: list[list[float]] = []
+    for s in sigs:
+        shape = getattr(s, "shape", None)
+        if shape:
+            n = 1
+            for d in shape:
+                n *= int(d)
+            v = getattr(s, "value", None)
+            if v is not None:
+                values.append([float(v)] * n)
+                continue
+        try:
+            values.append([float(x) for x in s])
+        except TypeError:
+            values.append([float(s)])
+
+    if not values:
+        return 0.0
+    width = min(len(v) for v in values)
+    if width == 0:
+        return 0.0
+
+    total = 0.0
+    for j in range(width):
+        col = [v[j] for v in values]
+        m = sum(col) / len(col)
+        var = sum((x - m) ** 2 for x in col) / len(col)
+        total += var ** 0.5
+    return total / width
+
+
+def _uniform_indices(total: int, count: int) -> list[int]:
+    """在 [0, total) 上均匀取 count 个下标（含两端），纯 Python 实现。
+
+    用于 max_frames 抽稀：**均匀抽稀而不是砍掉尾部**，以免时间轴后半段
+    完全没有画面证据。用纯 Python 是为了让本模块的规划逻辑不依赖 numpy，
+    从而在最小环境里可测。count >= total 时返回全部下标。
+
+    ≥1 时返回值必然包含 0 与 total-1，允许重复（total 很小时）。
+    """
+    if total <= 0 or count <= 0:
+        return []
+    if count >= total:
+        return list(range(total))
+    if count == 1:
+        return [0]
+    return [round(i * (total - 1) / (count - 1)) for i in range(count)]
 
 
 # --------------------------------------------------------------------------
@@ -383,7 +447,7 @@ def plan_frames(
     if max_frames and len(pending) > max_frames:
         truncated = len(pending) - max_frames
         # 均匀抽稀，保持时间轴覆盖，而不是砍掉尾部
-        keep_idx = {int(round(i)) for i in np.linspace(0, len(pending) - 1, max_frames)}
+        keep_idx = set(_uniform_indices(len(pending), max_frames))
         pending = [f for i, f in enumerate(pending) if i in keep_idx]
 
     return {

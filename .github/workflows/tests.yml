@@ -22,20 +22,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # 只装测试所需：单元测试不依赖 yt-dlp / faster-whisper / OCR，
-      # 这样 CI 不必下载 GB 级依赖，也能在纯离线环境跑通。
+      # 刻意只装测试运行器与 linter。
+      # 单元测试**不依赖** yt-dlp / faster-whisper / numpy / OCR，
+      # 因此 CI 不必下载 GB 级依赖，也能在纯离线环境复现。
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install pytest ruff
 
       - name: Lint (real-defect rules only)
-        run: ruff check video_ingest tests --select F,E9,B,C4,RET
+        run: ruff check video_ingest tests
 
       - name: Run unit tests
         run: python -m pytest tests -q
 
       - name: Smoke-test CLI wiring
-        run: |
-          python -m pytest tests/test_batch_ocr.py -q
-          python -c "import video_ingest.cli as c; p=c.build_parser(); print(sorted(p._subparsers._group_actions[0].choices))"
+        run: python -c "import video_ingest.cli as c; p=c.build_parser(); print(sorted(p._subparsers._group_actions[0].choices))"

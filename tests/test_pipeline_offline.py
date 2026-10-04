@@ -196,5 +196,10 @@ def test_doctor_warns_when_pytest_missing(monkeypatch):
     out = _run_doctor()
     assert out["checks"]["test_runner"]["ok"] is False
     assert any("pytest" in w for w in out.get("warnings", []))
-    # 缺测试运行器不等于取材依赖不可用
-    assert out["checks"]["dependencies"]["faster_whisper"]["ok"] is True
+    # 缺测试运行器不等于取材依赖不可用。
+    # 注意：不要在这里断言某个依赖"已安装"——测试套件本身不依赖
+    # yt-dlp / faster-whisper / numpy，CI 与最小环境都应在缺失时也能跑通。
+    # 只校验依赖检查自身结构完好、且没有被 pytest 的缺失牵连。
+    deps = out["checks"]["dependencies"]
+    assert {"yt_dlp", "faster_whisper", "av", "numpy"} <= set(deps)
+    assert all("ok" in v for v in deps.values())

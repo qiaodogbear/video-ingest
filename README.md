@@ -53,8 +53,11 @@ python -m venv .venv
 
 ```bash
 python -m video_ingest doctor     # 检查依赖、模型缓存、设备、可选依赖
-python -m pytest tests -q         # 应为 148 passed
+python -m pytest tests -q         # 应为 157 passed
 ```
+
+> 单元测试**不依赖** yt-dlp / faster-whisper / numpy / OCR：只装 `pytest`
+> 就能跑通全部测试。因此 CI 能在最小环境下快速验证，不必下载 GB 级依赖。
 
 有 NVIDIA GPU 时可加 `--device cuda --compute-type float16`。
 无 GPU 时用 CPU，**这不构成软件不可用**。
