@@ -1,0 +1,22 @@
+# 统一换行符：仓库内一律 LF，检出到 Windows 时也保持 LF。
+# 理由：CI 同时在 ubuntu 与 windows 上跑，若换行符随平台漂移，
+# 会出现"本地全文件改动"的噪声 diff，以及 Windows 下脚本执行差异。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.m4a binary
+*.mp4 binary
+*.webm binary
+*.zip binary
+*.onnx binary
+*.bin binary
+
+# PowerShell 脚本保持 CRLF，避免在部分 Windows 环境下解析异常
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
