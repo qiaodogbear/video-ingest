@@ -71,7 +71,8 @@ $py = ".\.venv\Scripts\python.exe"
 
 ```
 video_ingest/
-  __main__.py   CLI：doctor/probe/ingest/validate/chunks/frames/ocr/batch
+  __main__.py   入口薄转发（24 行），保留对 __main__ 的历史导入兼容
+  cli.py        CLI 实现：参数解析、命令分发、八个命令处理
   acquire.py    URL 规范化、身份解析、字幕探测（三态）与下载
   asr.py        音频下载、PyAV 解码、语言检测与转写
   transcript.py SRT/VTT/JSON 解析、标准化、导出、校正层
