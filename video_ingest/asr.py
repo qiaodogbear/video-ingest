@@ -187,8 +187,173 @@ def to_float32_mono16k(path: str | Path) -> tuple[Any, float]:
 
 
 # --------------------------------------------------------------------------
-# 转写
+# 设备选择与 GPU 可用性探测
 # --------------------------------------------------------------------------
+
+# 实测：CUDA 推理除了 cudnn（随 ctranslate2 打包）之外还需要 cuBLAS，
+# 而 pip 装的 ctranslate2 **不含** cuBLAS。nvidia-cublas-cu12 会把它装到
+# site-packages/nvidia/cublas/bin，Python 3.8+ 不再从 PATH 之外搜索依赖 DLL，
+# 因此必须把该目录显式加进 DLL 搜索路径。
+_CUDA_RUNTIME_LIBS = ("cublas64_12.dll", "cublasLt64_12.dll")
+_dll_path_registered = False
+# 兼容补丁只需打一次
+_av_patched = False
+
+
+def _patch_av_open() -> bool:
+    """修补 PyAV 与 faster-whisper 的签名不兼容。
+
+    现象：faster-whisper 1.2.x 内部调用
+        av.open(file, mode="r", metadata_errors="ignore")
+    而 PyAV 19.x 的 av.open 不接受 metadata_errors，直接抛
+        TypeError: open() got an unexpected keyword argument 'metadata_errors'
+
+    影响范围比想象的广：不只是解码文件，**连传入 numpy/列表音频**也会走到
+    这条路径（faster-whisper 会先把数组写成临时 wav 再 av.open）。因此
+    "自行解码绕开"只能解决文件路径，数组路径仍会失败。
+
+    做法：包一层 av.open，在 PyAV 不接受该参数时静默丢弃它。
+    metadata_errors 只影响元数据损坏时的容错，丢弃它对本用途无实质影响。
+    不升降级 PyAV 版本——那会牵动 ctranslate2/CUDA 依赖组合。
+    """
+    global _av_patched
+    if _av_patched:
+        return True
+    try:
+        import av
+    except Exception:  # noqa: BLE001
+        return False
+
+    original = av.open
+    if getattr(original, "_video_ingest_patched", False):
+        _av_patched = True
+        return True
+
+    def patched(*args, **kwargs):
+        if "metadata_errors" in kwargs:
+            try:
+                return original(*args, **kwargs)
+            except TypeError:
+                kwargs.pop("metadata_errors", None)
+        return original(*args, **kwargs)
+
+    patched._video_ingest_patched = True  # type: ignore[attr-defined]
+    av.open = patched
+    _av_patched = True
+    return True
+
+
+def _ensure_cuda_dll_path() -> list[str]:
+    """把 pip 安装的 CUDA 运行时目录加入 DLL 搜索路径。
+
+    返回已加入的目录列表（便于 doctor 报告与排错）。
+    """
+    global _dll_path_registered
+    added: list[str] = []
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("nvidia")
+    except Exception:  # noqa: BLE001
+        spec = None
+    if spec is None or not spec.submodule_search_locations:
+        return added
+
+    for root in spec.submodule_search_locations:
+        try:
+            from pathlib import Path as _Path
+
+            bin_dir = _Path(root) / "cublas" / "bin"
+            if not bin_dir.is_dir():
+                continue
+            # 必须用 add_dll_directory 持有句柄，否则目录会被立刻移除
+            os.add_dll_directory(str(bin_dir))
+            if str(bin_dir) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+            added.append(str(bin_dir))
+        except Exception:  # noqa: BLE001
+            continue
+    _dll_path_registered = bool(added)
+    return added
+
+
+def probe_gpu() -> dict[str, Any]:
+    """探测 GPU 是否真的可用。
+
+    **关键**：`ctranslate2.get_cuda_device_count()` 只查硬件，缺 cuBLAS 时
+    依然返回 1；而模型**加载**也会成功，只有真正推理才抛
+    `Library cublas64_12.dll is not found`。所以不能用"能否加载模型"判断，
+    必须实际跑一次极短推理。
+    """
+    result: dict[str, Any] = {
+        "available": False,
+        "device": "cpu",
+        "compute_type": "int8",
+        "reason": None,
+        "cuda_device_count": 0,
+        "dll_paths": [],
+    }
+    try:
+        import ctranslate2
+    except Exception as exc:  # noqa: BLE001
+        result["reason"] = "缺少 ctranslate2: %s" % exc
+        return result
+
+    try:
+        count = int(ctranslate2.get_cuda_device_count())
+    except Exception as exc:  # noqa: BLE001
+        result["reason"] = "查询 CUDA 设备失败: %s" % exc
+        return result
+    result["cuda_device_count"] = count
+    if count <= 0:
+        result["reason"] = "没有可见的 CUDA 设备（未安装驱动或 GPU 不可用）"
+        return result
+
+    result["dll_paths"] = _ensure_cuda_dll_path()
+
+    # 真正试一次推理：这是唯一能确认 cuBLAS 可加载的方法。
+    try:
+        import numpy as np
+        from faster_whisper import WhisperModel
+
+        _patch_av_open()
+        model = WhisperModel("tiny", device="cuda", compute_type="float16")
+        # faster-whisper 只接受文件路径/文件对象/numpy 数组，不接受 list
+        silence = np.zeros(TARGET_RATE, dtype=np.float32)   # 1 秒静音
+        segments, _info = model.transcribe(silence, language="en", beam_size=1)
+        list(segments)   # 必须迭代，否则不会触发推理
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        # 模型权重下载失败与 CUDA 不可用是两回事，不能混为一谈
+        if "cublas" in msg.lower() or "cudnn" in msg.lower():
+            reason = ("CUDA 运行库缺失：%s；CUDA 推理需要 cuBLAS，安装："
+                      "python -m pip install nvidia-cublas-cu12" % msg[:160])
+        elif isinstance(exc, (PermissionError, OSError)) and "huggingface" in msg.lower():
+            reason = ("探测用的小模型无法下载/写入缓存（%s）。"
+                      "这可与 CUDA 无关；请修复缓存目录权限或设 HF_HOME 后重试" % msg[:160])
+        else:
+            reason = "%s: %s" % (type(exc).__name__, msg[:200])
+        result["reason"] = reason
+        return result
+
+    result.update(available=True, device="cuda", compute_type="float16", reason=None)
+    return result
+
+
+def resolve_device(device: str) -> tuple[str, str, dict[str, Any]]:
+    """把 'auto' 解析成具体设备。
+
+    返回 (device, compute_type, probe_info)。
+    - auto：GPU 真能用就用 cuda+float16，否则回退 cpu+int8
+    - 显式 cpu/cuda：原样返回，不做探测（尊重用户选择）
+    """
+    if device != "auto":
+        return device, ("int8" if device == "cpu" else "float16"), {"available": None}
+    info = probe_gpu()
+    if info["available"]:
+        return "cuda", "float16", info
+    return "cpu", "int8", info
+
 
 def load_model(
     model_name: str = "medium",
@@ -204,6 +369,10 @@ def load_model(
     键包含 device/compute_type，避免不同配置互相串用。
     """
     from faster_whisper import WhisperModel
+
+    _patch_av_open()
+    if device == "cuda":
+        _ensure_cuda_dll_path()
 
     threads = cpu_threads or (os.cpu_count() or 4)
     key = (model_name, device, compute_type, threads)

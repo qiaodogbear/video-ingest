@@ -221,6 +221,35 @@ prob=1.000**，所以"比对 transcribe 返回的检测语言"这种做法**完�
 
 **建议**：不确定语言时用 `--language auto`。
 
+## 3e. GPU 加速（默认自动）
+
+`--device` 默认 `auto`：探测 GPU 是否**真正可用**，可用则 `cuda+float16`，
+否则回退 `cpu+int8`。实测（RTX 2070 SUPER，406s 中文音频，medium）：
+
+| 配置 | 转写 | 相对 CPU |
+|---|---|---|
+| CPU int8 | 1572.0s | 1× |
+| CUDA float16 | **44.3s** | **35×** |
+| CUDA int8_float16 | 62.5s | 25× |
+
+**三个必须知道的坑**：
+
+1. **"能加载模型"不等于 GPU 可用。** pip 装的 ctranslate2 不带 cuBLAS，
+   缺它时 `nvidia-smi` 与 `get_cuda_device_count()` 都正常、模型加载也成功，
+   只有真正推理才报 `Library cublas64_12.dll is not found`。
+   因此可用性判据必须是**一次真实推理探测**（`doctor --check-gpu`）。
+2. **修复**：`pip install nvidia-cublas-cu12`（或 `-e ".[cuda]"`）。
+   Python 3.8+ 不从 PATH 之外搜索依赖 DLL，工具会自动注册该目录。
+3. **GPU 上默认 float16，不是 int8**：20 系卡 INT8 路径更慢（62.5s vs 44.3s）。
+
+**设备差异会体现在分块粒度上**：同一音频、同一 `--language zh`，CUDA 出 150 条
+片段而 CPU 出 68 条（对齐/解码内核不同）。这不影响内容，但**跨设备比较片段数
+或复现分块结果时要注意**，不要把它当成质量指标。
+
+另外：`--language zh` 在 Whisper 里是"中文"，**不区分简繁**——实测简繁视频都
+可能转出繁体。需要简体时用 `--prompt` 明确要求，或后处理转换（不要因此改动
+原文层，走校正层）。
+
 
 ---
 

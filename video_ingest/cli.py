@@ -1,4 +1,4 @@
-﻿"""CLI 实现：参数解析、命令分发与各命令处理。
+"""CLI 实现：参数解析、命令分发与各命令处理。
 
 契约（bootstrap §5）：
   doctor   —— 检查环境，不输出任何 token/cookie
@@ -154,7 +154,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "note": "离线运行需要预先缓存；按名称加载可能触发下载",
     }
 
-    # GPU（不能默认存在）
+    # GPU：硬件可见 ≠ 可用。缺 cuBLAS 时 ctranslate2 连"加载模型"都会成功，
+    # 只有真正推理才报错，因此这里做一次实打实的可用性探测。
     gpu = {"nvidia_visible": False, "note": "无 GPU 时使用 CPU，不判定软件不可用"}
     try:
         nvsmi = shutil.which("nvidia-smi")
@@ -167,6 +168,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             gpu["devices"] = names
     except Exception as exc:  # noqa: BLE001
         gpu["error"] = redact(str(exc))
+
+    if args.check_gpu:
+        try:
+            from .asr import probe_gpu
+            probe = probe_gpu()
+            gpu["usable_for_inference"] = probe["available"]
+            gpu["recommended"] = ("--device cuda --compute-type float16"
+                                  if probe["available"] else "--device cpu")
+            if not probe["available"]:
+                gpu["unavailable_reason"] = probe["reason"]
+        except Exception as exc:  # noqa: BLE001
+            gpu["usable_for_inference"] = False
+            gpu["unavailable_reason"] = redact(str(exc))
+        if not gpu.get("usable_for_inference"):
+            info.setdefault("warnings", []).append(
+                "GPU 不可用于推理，将回退 CPU（--device auto 会自动选择）。"
+                "原因见 checks.gpu.unavailable_reason")
+    else:
+        gpu["note"] = ("未做推理级探测；加 --check-gpu 可确认 GPU 是否真的可用"
+                       "（硬件可见不等于可用）")
     info["checks"]["gpu"] = gpu
 
     # yt-dlp 版本（用于运行报告）
@@ -992,6 +1013,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser("doctor", help="检查环境，不输出任何 token/cookie")
+    d.add_argument("--check-gpu", action="store_true",
+                   help="做一次真实推理探测，确认 GPU 是否真的可用（硬件可见不等于可用）")
     d.set_defaults(func=cmd_doctor)
 
     pr = sub.add_parser("probe", help="只探测身份/分P/时长/字幕键/鉴权需要")
@@ -1009,8 +1032,10 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--output-dir", default=None)
     ing.add_argument("--language", default="zh", help="语言代码，或 auto")
     ing.add_argument("--model", default="medium", help="faster-whisper 模型（tiny..large-v3）")
-    ing.add_argument("--device", default="cpu", help="cpu 或 cuda")
-    ing.add_argument("--compute-type", default="int8", help="int8(CPU) / float16(CUDA)")
+    ing.add_argument("--device", default="auto",
+                     help="auto（默认，GPU 真可用则用 cuda）| cpu | cuda")
+    ing.add_argument("--compute-type", default=None,
+                     help="留空则按设备选择：cuda→float16，cpu→int8")
     ing.add_argument("--force-asr", action="store_true", help="即使有字幕也改用音频转写（用于比对）")
     ing.add_argument("--chars-per-chunk", type=int, default=3000,
                      help="分块字符预算（不是 token 数）")
@@ -1052,8 +1077,8 @@ def build_parser() -> argparse.ArgumentParser:
     ba.add_argument("--output-dir", default=None)
     ba.add_argument("--language", default="zh")
     ba.add_argument("--model", default="medium")
-    ba.add_argument("--device", default="cpu")
-    ba.add_argument("--compute-type", default="int8")
+    ba.add_argument("--device", default="auto")
+    ba.add_argument("--compute-type", default=None)
     ba.add_argument("--force-asr", action="store_true")
     ba.add_argument("--chars-per-chunk", type=int, default=3000)
     ba.add_argument("--corrections", default=None)

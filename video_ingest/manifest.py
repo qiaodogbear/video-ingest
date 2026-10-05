@@ -131,6 +131,8 @@ def new_manifest(
             "model_revision": None,
             "compute_type": None,
             "device": None,
+            "device_requested": None,     # 用户请求值（可能是 auto）
+            "gpu_probe": None,            # 设备解析时探测到的 GPU 情况
             "language": None,
             "detected_language": None,
             "language_mismatch": False,

@@ -21,7 +21,7 @@ from .acquire import (
     resolve_page,
     yt_dlp_version,
 )
-from .asr import download_audio, transcribe_audio
+from .asr import download_audio, resolve_device, transcribe_audio
 from .chunks import build_chunks, validate_coverage, write_chunks
 from .manifest import (
     add_coverage_basis,
@@ -111,8 +111,8 @@ def run_ingest(
     output_dir: Path,
     language: str = "zh",
     model: str = "medium",
-    device: str = "cpu",
-    compute_type: str = "int8",
+    device: str = "auto",
+    compute_type: str | None = None,
     cookies_file: str | None = None,
     force_asr: bool = False,
     chars_per_chunk: int = 3000,
@@ -120,15 +120,31 @@ def run_ingest(
     initial_prompt: str | None = None,
     log: Logger = _noop,
 ) -> dict[str, Any]:
-    """执行一次取材任务，返回结果摘要（含 job_dir 与 manifest 路径）。"""
+    """执行一次取材任务，返回结果摘要（含 job_dir 与 manifest 路径）。
+
+    device 支持 "auto"：先探测 GPU 是否**真正可用**（缺 cuBLAS 时硬件可见
+    但推理会失败），可用则用 cuda+float16，否则回退 cpu+int8。
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     corrections = corrections or {}
+
+    requested_device = device
+    resolved_device, resolved_ct, gpu_info = resolve_device(device)
+    if compute_type:
+        resolved_ct = compute_type
+    if resolved_device != device:
+        log("设备解析：%s -> %s（compute_type=%s）" % (device, resolved_device, resolved_ct))
+    if resolved_device == "cuda" and not compute_type:
+        # 实测 20 系卡上 GPU 的 int8 路径反而比 float16 慢，故默认 float16
+        log("使用 GPU：compute_type=%s（未显式指定时默认 float16）" % resolved_ct)
+    device, compute_type = resolved_device, resolved_ct
 
     if media:
         return _ingest_local_media(
             media=media, output_dir=output_dir, language=language, model=model,
             device=device, compute_type=compute_type, chars_per_chunk=chars_per_chunk,
             corrections=corrections, initial_prompt=initial_prompt, log=log,
+            requested_device=requested_device, gpu_info=gpu_info,
         )
 
     if not url:
@@ -165,6 +181,17 @@ def run_ingest(
         python_version=sys.version.split()[0],
     )
     man["subtitle"]["auth_used"] = bool(cookies_file)
+
+    # 记录设备选择与 GPU 探测结论，便于事后解释"为什么这次跑在 CPU 上"
+    man["asr"]["device_requested"] = requested_device
+    man["asr"]["gpu_probe"] = {
+        "available": gpu_info.get("available"),
+        "cuda_device_count": gpu_info.get("cuda_device_count"),
+        "reason": gpu_info.get("reason"),
+        "dll_paths": gpu_info.get("dll_paths"),
+    }
+    if gpu_info.get("available") is False and requested_device == "auto":
+        add_note(man, "GPU 探测结论为不可用，已回退 CPU。原因：%s" % gpu_info.get("reason"))
 
     # 保留简介作为合法辅助材料（但不作为全文，bootstrap：简介不等于全文）
     (job_dir / "source").mkdir(exist_ok=True)
@@ -358,8 +385,11 @@ def _ingest_local_media(
     *, media: str, output_dir: Path, language: str, model: str, device: str,
     compute_type: str, chars_per_chunk: int, corrections: dict,
     initial_prompt: str | None, log: Logger,
+    requested_device: str = "cpu",
+    gpu_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """处理用户本地媒体文件（无网络依赖）。"""
+    gpu_info = gpu_info or {}
     path = Path(media)
     if not path.exists():
         raise AcquireError("invalid_input", "本地媒体不存在: %s" % path)
@@ -378,6 +408,15 @@ def _ingest_local_media(
         faster_whisper_version=None,
         python_version=sys.version.split()[0],
     )
+    man["asr"]["device_requested"] = requested_device
+    man["asr"]["gpu_probe"] = {
+        "available": gpu_info.get("available"),
+        "cuda_device_count": gpu_info.get("cuda_device_count"),
+        "reason": gpu_info.get("reason"),
+        "dll_paths": gpu_info.get("dll_paths"),
+    }
+    if gpu_info.get("available") is False and requested_device == "auto":
+        add_note(man, "GPU 探测结论为不可用，已回退 CPU。原因：%s" % gpu_info.get("reason"))
 
     asr_out = transcribe_audio(
         path, model_name=model, language=language, device=device,

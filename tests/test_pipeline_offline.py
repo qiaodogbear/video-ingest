@@ -157,7 +157,7 @@ def test_zero_segments_cannot_be_reported_as_success():
 # doctor 的环境报告
 # --------------------------------------------------------------------------
 
-def _run_doctor():
+def _run_doctor(check_gpu: bool = False):
     import argparse
     import io
     import json as _json
@@ -168,7 +168,7 @@ def _run_doctor():
     old = sys.stdout
     sys.stdout = buf
     try:
-        cli.cmd_doctor(argparse.Namespace())
+        cli.cmd_doctor(argparse.Namespace(check_gpu=check_gpu))
     finally:
         sys.stdout = old
     return _json.loads(buf.getvalue())

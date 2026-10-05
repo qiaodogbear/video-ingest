@@ -52,15 +52,56 @@ python -m venv .venv
 验证安装：
 
 ```bash
-python -m video_ingest doctor     # 检查依赖、模型缓存、设备、可选依赖
-python -m pytest tests -q         # 应为 157 passed
+python -m video_ingest doctor     # 检查依赖、模型缓存、可选依赖
+python -m pytest tests -q         # 应为 170 passed
 ```
 
-> 单元测试**不依赖** yt-dlp / faster-whisper / numpy / OCR：只装 `pytest`
-> 就能跑通全部测试。因此 CI 能在最小环境下快速验证，不必下载 GB 级依赖。
+> 单元测试**不依赖** yt-dlp / faster-whisper / numpy / ctranslate2 / OCR：
+> 只装 `pytest` 就能跑通全部测试。因此 CI 能在最小环境下快速验证，
+> 不必下载 GB 级依赖。
 
-有 NVIDIA GPU 时可加 `--device cuda --compute-type float16`。
-无 GPU 时用 CPU，**这不构成软件不可用**。
+### GPU 加速（默认自动）
+
+`--device` 默认是 **`auto`**：探测 GPU 是否**真正可用**，可用则用
+`cuda + float16`，否则回退 `cpu + int8`。
+
+实测（RTX 2070 SUPER，406 秒中文音频，`medium` 模型）：
+
+| 配置 | 加载 | 转写 | 相对 CPU |
+|---|---|---|---|
+| CPU int8 | 146.0s | 1572.0s（26 分钟） | 1× |
+| **CUDA float16** | 6.4s | **44.3s** | **35×** |
+| CUDA int8_float16 | 10.2s | 62.5s | 25× |
+
+**GPU 上默认 `float16` 而不是 `int8`**：实测 20 系卡的 INT8 张量核路径反而
+更慢（62.5s vs 44.3s）。这与 CPU 上惯用 int8 的直觉相反。
+
+⚠️ **CUDA 需要一个额外依赖。** pip 安装的 ctranslate2 **不带 cuBLAS**，
+缺它时会出现两个容易误判的现象：
+
+1. `nvidia-smi` 能看到显卡，`ctranslate2.get_cuda_device_count()` 也返回 1；
+2. **模型加载会成功**，只有真正推理那一刻才报
+   `Library cublas64_12.dll is not found`。
+
+所以**"能加载模型"不能作为 GPU 可用的判据**。修复：
+
+```bash
+pip install nvidia-cublas-cu12     # 或 pip install -e ".[cuda]"
+```
+
+装完用它确认真可用（该命令会做一次真实推理探测，而不只是看硬件）：
+
+```bash
+video-ingest doctor --check-gpu
+# checks.gpu.usable_for_inference 为 true 才代表 GPU 真能用
+```
+
+另外：`cudnn64_9.dll` 随 ctranslate2 打包，但 cuBLAS 不会；Python 3.8+ 不再从
+PATH 之外搜索依赖 DLL，因此本工具会自动把 pip 安装的 CUDA 运行库目录注册进
+DLL 搜索路径。
+
+**设备选择会记入 manifest**（`asr.device_requested` / `asr.device` /
+`asr.gpu_probe`），便于事后解释"这次为什么跑在 CPU 上"。
 
 ---
 

@@ -14,13 +14,13 @@
 |---|---|---|
 | CLI 工具 | `video_ingest/`（本仓库内） | 已验证 |
 | 命令行入口 | `video_ingest/cli.py`，控制台脚本 `video-ingest` | 已验证 |
-| 单元测试 | `tests/`（157 项） | 已验证（`157 passed`） |
+| 单元测试 | `tests/`（170 项） | 已验证（`170 passed`） |
 | 静态检查 | `ruff --select F,E9,B,C4,RET` | 已验证（全绿） |
 | SOP 文档 | [SOP.md](SOP.md) | 已验证 |
 | Skill | `skill/video-ingest/` | 已验证（官方校验器通过） |
 | 锁定清单 | `requirements.lock.txt` | 已验证 |
 | 示例校正表 | `corrections.example.json` | 已验证 |
-| CI | `.github/workflows/tests.yml` | 已编写（未在 GitHub 上运行过） |
+| CI | `.github/workflows/tests.yml` | **已验证**（4 个矩阵任务 success，见 §3.7） |
 
 ## 2. 八条 CLI 命令
 
@@ -248,6 +248,12 @@ note: 警示：指定语言 zh，但 ASR 检测到语音为 en…识别的**内�
 | 21 | 语言检测与转写各加载一次 whisper 模型 | medium 模型白加载两次（各数秒、数百 MB 内存） | 加进程内模型缓存（实测二次加载 1.05s → 0.0000s） |
 | 22 | `__main__.py` 膨胀到 948 行 | 可维护性差 | 实现移入 `cli.py`，`__main__.py` 变 24 行薄转发并保留兼容导入 |
 | 23 | 用 PowerShell 5.1 的 `Set-Content`/`Get-Content -Raw` 改文档 | **静默破坏 UTF-8**（按 GBK 解码、写入带 BOM），README 与本文档曾损坏 | 改为只用支持 UTF-8 的写入方式；加全仓库 UTF-8 合法性扫描 |
+| 24 | CI 只装 pytest+ruff，而 	ests/test_visual.py 直接 import numpy | **4 个矩阵任务全部失败**（本地能过只因 venv 恰好有 numpy） | 不靠给 CI 加依赖解决，而是让测试套件零第三方依赖（惰性导入、纯 Python 抽稀、替身桩） |
+| 25 | --device 默认 cpu，文档只写"可加 --device cuda" | **有 GPU 也永远跑在 CPU 上**，无人察觉 | 默认改 uto + 真实推理探测；README 补 GPU 章节 |
+| 26 | 以"能否加载模型"判断 GPU 可用性 | pip 的 ctranslate2 缺 cuBLAS 时**加载成功、推理才失败**，判据完全失效 | 改为实际跑一次极短推理；doctor --check-gpu 暴露结论 |
+| 27 | 缺 cuBLAS 的报错只说英文库名 | 用户不知道要装什么 | 报错附带 `pip install nvidia-cublas-cu12`；并把缓存失败与 CUDA 失败区分开 |
+| 28 | PyAV 补丁只覆盖文件解码路径 | faster-whisper 传入**数组**时同样走 `av.open(metadata_errors=...)`，该路径仍失败 | 打 `av.open` 兼容补丁，覆盖全部路径 |
+| 29 | 测试文件被编辑插串（函数体互相污染） | 出现名字与内容不符的用例 | 修正并补正向路径用例 |
 
 其中 #4、#5 是**状态机类缺陷**：工具"跑成功了"却报告失败，或"什么都没拿到"却报告成功。两者都会直接误导下游总结。
 
