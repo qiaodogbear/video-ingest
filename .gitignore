@@ -31,6 +31,19 @@ pytest-of-Administrator/
 # 发布/分享产物
 dist-share/
 
+# 本地临时/探索脚本：由其他会话或实验产生，未经审查，不应自动入库。
+# 本项目对外只发布 scripts/ 下经过审查的内容（如 make_release.ps1）。
+scripts/_*
+scripts/*_survey.py
+scripts/diarize.py
+scripts/burnin_ocr.py
+scripts/proof_check.py
+scripts/align_ref.py
+scripts/show_ambiguous.py
+scripts/cut_ambiguous*.py
+scripts/ocr_ambiguous_frames.py
+scripts/make_subtitle_doc.py
+
 # 编辑器与系统
 .vscode/
 .idea/
