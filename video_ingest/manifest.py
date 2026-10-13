@@ -113,7 +113,9 @@ def new_manifest(
         "timing": {
             "claimed_duration": None,      # 平台声称时长（秒）
             "decoded_duration": None,      # 实际解码时长（秒）
-            "last_cue_end": None,          # 最后一条字幕结束时间
+            "last_cue_end": None,          # 最后一条字幕/片段结束时间
+            "transcribed_end": None,       # 实际转写覆盖到的终点（秒）
+            "speech_duration": None,       # 片段累计语音时长（秒），≠ 解码时长
         },
         "subtitle": {
             "probe_state": "not_probed",   # found | empty | needs_auth_check | not_probed

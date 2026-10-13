@@ -198,6 +198,110 @@ _CUDA_RUNTIME_LIBS = ("cublas64_12.dll", "cublasLt64_12.dll")
 _dll_path_registered = False
 # 兼容补丁只需打一次
 _av_patched = False
+# GPU 探测结果按进程缓存：探测本身要跑一次推理（秒级），
+# 同一进程内重复调用（如 doctor + ingest）不应重复付这个代价。
+_GPU_PROBE_CACHE: dict[str, Any] | None = None
+# 离线模式只需判定一次
+_offline_checked = False
+
+
+def _hf_cache_roots() -> list[Path]:
+    """列出可能的 HuggingFace 缓存根目录。"""
+    roots: list[Path] = []
+    env_home = os.environ.get("HF_HOME")
+    if env_home:
+        roots.append(Path(env_home) / "hub")
+    roots.append(Path.home() / ".cache" / "huggingface" / "hub")
+    roots.append(Path(os.environ.get("XDG_CACHE_HOME", "")) / "huggingface" / "hub"
+                 if os.environ.get("XDG_CACHE_HOME") else Path("/nonexistent"))
+    return roots
+
+
+def model_is_cached(model_name: str) -> bool:
+    """判断模型权重是否已在本地缓存。
+
+    只做目录与 blob 存在性检查，不触发任何网络请求。
+    """
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("huggingface_hub") is None:
+            return False
+        from huggingface_hub import scan_cache_dir  # type: ignore
+
+        for cache in scan_cache_dir().repos:
+            if cache.repo_id in ("Systran/faster-whisper-%s" % model_name,
+                                 "Systran/faster-whisper-%s" % model_name.replace("-", "_")):
+                if cache.size_on_disk > 0:
+                    return True
+    except Exception:  # noqa: BLE001
+        # 退回纯文件系统判断
+        pass
+
+    for root in _hf_cache_roots():
+        if not root.is_dir():
+            continue
+        for d in root.glob("models--*--faster-whisper-%s" % model_name):
+            blobs = list(d.glob("blobs/*"))
+            if any(b.is_file() and b.stat().st_size > 1024 * 1024 for b in blobs):
+                return True
+    return False
+
+
+def any_model_cached() -> bool:
+    """本地是否已有任意 faster-whisper 模型（用于决定是否可离线）。"""
+    for root in _hf_cache_roots():
+        if not root.is_dir():
+            continue
+        for d in root.glob("models--*--faster-whisper-*"):
+            blobs = list(d.glob("blobs/*"))
+            if any(b.is_file() and b.stat().st_size > 1024 * 1024 for b in blobs):
+                return True
+    return False
+
+
+def bootstrap_hf_offline() -> str | None:
+    """在**导入 huggingface_hub 之前**决定是否启用离线模式。
+
+    **关键实现约束**：`huggingface_hub` 在 import 时就把 HF_HUB_OFFLINE 读进
+    模块常量，之后再设环境变量没有任何效果（这就是第一版修复无效的原因）。
+    因此这个函数必须在任何 huggingface_hub/faster_whisper 导入之前调用——
+    实际做法是在 CLI 入口 main() 的最开头调用。
+
+    为什么值得做：实测加载模型时 huggingface_hub 会联网做元数据校验，本机要
+    **48.6s** 才超时；同一模型离线加载只要 **0.39s**（tiny）/ 2.98s（medium）。
+
+    只在本地确有缓存时启用，因此不影响首次下载。返回启用的原因说明或 None。
+    """
+    if os.environ.get("HF_HUB_OFFLINE") is not None:
+        return "用户已显式设置 HF_HUB_OFFLINE=%s" % os.environ["HF_HUB_OFFLINE"]
+    try:
+        if any_model_cached():
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            return ("检测到本地已缓存模型，启用 HF 离线模式以避免每次加载时的"
+                    "联网校验（实测可省 45 秒以上）")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _enable_offline_if_cached(model_name: str) -> bool:
+    """尽力而为的兜底：若 huggingface_hub 尚未导入，此时设置仍然有效。"""
+    global _offline_checked
+    if _offline_checked:
+        return os.environ.get("HF_HUB_OFFLINE") == "1"
+    if os.environ.get("HF_HUB_OFFLINE") is not None:
+        _offline_checked = True
+        return os.environ.get("HF_HUB_OFFLINE") == "1"
+    try:
+        if "huggingface_hub" not in sys.modules and model_is_cached(model_name):
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            _offline_checked = True
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    _offline_checked = True
+    return False
 
 
 def _patch_av_open() -> bool:
@@ -277,14 +381,36 @@ def _ensure_cuda_dll_path() -> list[str]:
     return added
 
 
-def probe_gpu() -> dict[str, Any]:
+def probe_gpu(*, use_cache: bool = True) -> dict[str, Any]:
     """探测 GPU 是否真的可用。
 
     **关键**：`ctranslate2.get_cuda_device_count()` 只查硬件，缺 cuBLAS 时
     依然返回 1；而模型**加载**也会成功，只有真正推理才抛
     `Library cublas64_12.dll is not found`。所以不能用"能否加载模型"判断，
     必须实际跑一次极短推理。
+
+    结果按进程缓存；`use_cache=False` 可强制重探。
+    设环境变量 `VIDEO_INGEST_SKIP_GPU_PROBE=1` 可直接跳过（测试用）。
     """
+    global _GPU_PROBE_CACHE
+    if use_cache and _GPU_PROBE_CACHE is not None:
+        return dict(_GPU_PROBE_CACHE)
+
+    if os.environ.get("VIDEO_INGEST_SKIP_GPU_PROBE") == "1":
+        result = {
+            "available": False, "device": "cpu", "compute_type": "int8",
+            "reason": "已通过 VIDEO_INGEST_SKIP_GPU_PROBE 跳过 GPU 探测",
+            "cuda_device_count": 0, "dll_paths": [],
+        }
+        _GPU_PROBE_CACHE = result
+        return dict(result)
+
+    result = _probe_gpu_uncached()
+    _GPU_PROBE_CACHE = result
+    return dict(result)
+
+
+def _probe_gpu_uncached() -> dict[str, Any]:
     result: dict[str, Any] = {
         "available": False,
         "device": "cpu",
@@ -317,6 +443,9 @@ def probe_gpu() -> dict[str, Any]:
         from faster_whisper import WhisperModel
 
         _patch_av_open()
+        # 必须先注册 CUDA 运行库路径再加载模型，否则会白等一次失败的加载尝试
+        _ensure_cuda_dll_path()
+        _enable_offline_if_cached("tiny")
         model = WhisperModel("tiny", device="cuda", compute_type="float16")
         # faster-whisper 只接受文件路径/文件对象/numpy 数组，不接受 list
         silence = np.zeros(TARGET_RATE, dtype=np.float32)   # 1 秒静音
@@ -371,6 +500,7 @@ def load_model(
     from faster_whisper import WhisperModel
 
     _patch_av_open()
+    _enable_offline_if_cached(model_name)
     if device == "cuda":
         _ensure_cuda_dll_path()
 

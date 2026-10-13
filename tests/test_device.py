@@ -13,10 +13,26 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from video_ingest import asr  # noqa: E402
 from video_ingest.asr import resolve_device  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clear_module_caches():
+    """每个用例前后清掉模块级缓存。
+
+    probe_gpu 结果按进程缓存（避免反复付秒级探测代价），但若不清理，
+    用例之间会互相污染——上一个用例的桩结果会漏进下一个用例。
+    """
+    asr._GPU_PROBE_CACHE = None
+    asr._offline_checked = False
+    yield
+    asr._GPU_PROBE_CACHE = None
+    asr._offline_checked = False
 
 
 def test_explicit_cpu_is_respected():
@@ -61,7 +77,7 @@ def test_probe_reports_reason_when_no_cuda_device(monkeypatch):
             return 0
 
     monkeypatch.setitem(sys.modules, "ctranslate2", FakeCT)
-    result = asr.probe_gpu()
+    result = asr._probe_gpu_uncached()
     assert result["available"] is False
     assert result["cuda_device_count"] == 0
     assert "没有可见的 CUDA 设备" in result["reason"]
@@ -70,7 +86,7 @@ def test_probe_reports_reason_when_no_cuda_device(monkeypatch):
 def test_probe_handles_missing_ctranslate2(monkeypatch):
     monkeypatch.setitem(sys.modules, "ctranslate2", None)
     monkeypatch.delitem(sys.modules, "ctranslate2", raising=False)
-    result = asr.probe_gpu()
+    result = asr._probe_gpu_uncached()
     assert result["available"] is False
     assert result["reason"]
 
@@ -111,7 +127,7 @@ def test_probe_explains_missing_cublas(monkeypatch):
 
     _install_probe_stubs(monkeypatch, FakeModel)
 
-    result = asr.probe_gpu()
+    result = asr._probe_gpu_uncached()
     assert result["available"] is False
     assert "nvidia-cublas-cu12" in result["reason"]
 
@@ -125,7 +141,7 @@ def test_probe_distinguishes_cache_error_from_cuda_error(monkeypatch):
 
     _install_probe_stubs(monkeypatch, FakeModel)
 
-    result = asr.probe_gpu()
+    result = asr._probe_gpu_uncached()
     assert result["available"] is False
     assert "缓存" in result["reason"]
     assert "nvidia-cublas" not in result["reason"]
@@ -144,7 +160,7 @@ def test_probe_succeeds_when_inference_runs(monkeypatch):
             return FakeSegments(), object()
 
     _install_probe_stubs(monkeypatch, FakeModel)
-    result = asr.probe_gpu()
+    result = asr._probe_gpu_uncached()
     assert result["available"] is True
     assert result["device"] == "cuda"
     assert result["compute_type"] == "float16"

@@ -118,6 +118,7 @@ def run_ingest(
     chars_per_chunk: int = 3000,
     corrections: dict[str, str] | None = None,
     initial_prompt: str | None = None,
+    vad_filter: bool = True,
     log: Logger = _noop,
 ) -> dict[str, Any]:
     """执行一次取材任务，返回结果摘要（含 job_dir 与 manifest 路径）。
@@ -144,7 +145,7 @@ def run_ingest(
             media=media, output_dir=output_dir, language=language, model=model,
             device=device, compute_type=compute_type, chars_per_chunk=chars_per_chunk,
             corrections=corrections, initial_prompt=initial_prompt, log=log,
-            requested_device=requested_device, gpu_info=gpu_info,
+            requested_device=requested_device, gpu_info=gpu_info, vad_filter=vad_filter,
         )
 
     if not url:
@@ -204,6 +205,7 @@ def run_ingest(
             norm=norm, url=url, language=language, model=model, device=device,
             compute_type=compute_type, cookies_file=cookies_file, force_asr=force_asr,
             corrections=corrections, initial_prompt=initial_prompt, log=log,
+            vad_filter=vad_filter,
         )
     except AcquireError as exc:
         man["processing_status"] = "blocked" if exc.kind == "needs_login" else "failed"
@@ -259,7 +261,7 @@ def _acquire_transcript(
     *, man: dict, job_dir: Path, opener: Any, info: dict, page: dict, norm: dict,
     url: str, language: str, model: str, device: str, compute_type: str,
     cookies_file: str | None, force_asr: bool, corrections: dict, initial_prompt: str | None,
-    log: Logger,
+    log: Logger, vad_filter: bool = True,
 ) -> dict[str, Any]:
     """取得转录：优先字幕，必要时 ASR。"""
     cid = page["cid"]
@@ -318,6 +320,7 @@ def _acquire_transcript(
     asr_out = transcribe_audio(
         dl["path"], model_name=model, language=language, device=device,
         compute_type=compute_type, initial_prompt=initial_prompt, on_progress=log,
+        vad_filter=vad_filter,
     )
 
     man["asr"].update(
@@ -387,6 +390,7 @@ def _ingest_local_media(
     initial_prompt: str | None, log: Logger,
     requested_device: str = "cpu",
     gpu_info: dict[str, Any] | None = None,
+    vad_filter: bool = True,
 ) -> dict[str, Any]:
     """处理用户本地媒体文件（无网络依赖）。"""
     gpu_info = gpu_info or {}
@@ -421,6 +425,7 @@ def _ingest_local_media(
     asr_out = transcribe_audio(
         path, model_name=model, language=language, device=device,
         compute_type=compute_type, initial_prompt=initial_prompt, on_progress=log,
+        vad_filter=vad_filter,
     )
     man["asr"].update(
         used=True, model=asr_out["params"]["model"], device=asr_out["params"]["device"],
@@ -537,11 +542,41 @@ def _assess_coverage(
         return
 
     if result.get("mode") == "asr":
-        add_coverage_basis(man, "本地 ASR 覆盖完整音频时长（%s 秒）" % decoded)
+        # 注意：ASR 路径的覆盖率**不等于**"解码了多长音频"。
+        # VAD 会丢弃被判为非语音的片段，因此必须按实际转写出的语音时长来判。
+        # 实测反例：一段 973s 现场演出，开启 VAD 后只转出 778s / 357 段，
+        # 而关闭 VAD 得到 963s / 438 段——若按解码时长判，会错误地声称
+        # "覆盖完整音频"，把丢掉的内容说成完整。
+        speech = sum(s["end"] - s["start"] for s in segments) if segments else 0.0
+        covered = last_end or 0.0
+        if decoded:
+            ratio = min(1.0, covered / decoded)
+            add_coverage_basis(man, "转写覆盖到 %.1fs / 解码时长 %.1fs（%.0f%%）"
+                               % (covered, decoded, ratio * 100))
+            add_coverage_basis(man, "其中实际语音 %.1fs（占解码时长 %.0f%%）"
+                               % (speech, 100 * speech / decoded))
+        man["timing"]["transcribed_end"] = round(covered, 2)
+        man["timing"]["speech_duration"] = round(speech, 2)
+
         if claimed and decoded:
             drift = abs(decoded - claimed) / claimed
             add_coverage_basis(man, "解码时长与平台声称时长偏差 %.1f%%" % (drift * 100))
-            man["full_video_coverage"] = "supported" if drift <= 0.05 else "uncertain"
+        else:
+            drift = 0.0
+
+        # 转写终点明显短于解码时长 → 有片段未进入转录，覆盖率只能算 uncertain
+        tail_gap = (decoded - covered) if decoded else 0.0
+        if tail_gap > max(30.0, 0.05 * decoded):
+            man["full_video_coverage"] = "uncertain"
+            add_coverage_basis(man, "末尾有 %.0fs 未产生任何片段（可能是静音/掌声，"
+                                    "也可能是 VAD 过滤或识别失败），无法确认为完整覆盖" % tail_gap)
+            if not man.get("asr", {}).get("vad_filter", True):
+                add_note(man, "警示：已关闭 VAD 仍有 %.0fs 未覆盖，建议核查该段音频" % tail_gap)
+            else:
+                add_note(man, "警示：VAD 已开启且末尾 %.0fs 未覆盖。"
+                              "现场演出/掌声多的音频建议改用 --no-vad" % tail_gap)
+        elif drift > 0.05:
+            man["full_video_coverage"] = "uncertain"
         else:
             man["full_video_coverage"] = "supported"
     else:

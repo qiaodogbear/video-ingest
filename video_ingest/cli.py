@@ -388,6 +388,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             compute_type=args.compute_type, cookies_file=args.cookies,
             force_asr=args.force_asr, chars_per_chunk=args.chars_per_chunk,
             corrections=corrections, initial_prompt=args.prompt, log=log,
+            vad_filter=args.vad,
         )
     except AcquireError as exc:
         _print_json({"ok": False, "stage": "ingest", "kind": exc.kind, "message": str(exc)})
@@ -861,6 +862,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
                 compute_type=args.compute_type, cookies_file=args.cookies,
                 force_asr=args.force_asr, chars_per_chunk=args.chars_per_chunk,
                 corrections=corrections, initial_prompt=args.prompt, log=log,
+                vad_filter=args.vad,
             )
             results.append({
                 "page": page_no, "status": "ok", "job_id": job_id,
@@ -1041,6 +1043,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="分块字符预算（不是 token 数）")
     ing.add_argument("--corrections", default=None, help="JSON 校正表 {错:对}")
     ing.add_argument("--prompt", default=None, help="领域提示词，提升专有名词识别率")
+    ing.add_argument("--no-vad", dest="vad", action="store_false", default=True,
+                     help="关闭 VAD 静音过滤。现场演出/掌声/笑声多的音频必须关，"
+                          "否则 VAD 会误删大量语音")
     ing.set_defaults(func=cmd_ingest)
 
     va = sub.add_parser("validate", help="区分资源处理覆盖情况与识别准确性核查")
@@ -1083,6 +1088,8 @@ def build_parser() -> argparse.ArgumentParser:
     ba.add_argument("--chars-per-chunk", type=int, default=3000)
     ba.add_argument("--corrections", default=None)
     ba.add_argument("--prompt", default=None)
+    ba.add_argument("--no-vad", dest="vad", action="store_false", default=True,
+                    help="关闭 VAD 静音过滤（现场演出类音频建议关闭）")
     ba.add_argument("--resume", action="store_true", default=True,
                     help="跳过已有完成产物的分P（默认开启）")
     ba.add_argument("--force", dest="resume", action="store_false",
@@ -1099,6 +1106,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 必须在任何 huggingface_hub 导入之前决定离线模式：
+    # 该库在 import 时就把 HF_HUB_OFFLINE 读成模块常量，之后再设环境变量无效。
+    # 本地已缓存模型时启用，可省掉每次加载模型的联网校验（实测 45 秒以上）。
+    try:
+        from .asr import bootstrap_hf_offline
+        reason = bootstrap_hf_offline()
+        if reason and os.environ.get("VIDEO_INGEST_VERBOSE"):
+            _eprint("[env] %s" % reason)
+    except Exception:  # noqa: BLE001
+        pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
