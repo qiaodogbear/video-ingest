@@ -115,7 +115,7 @@ def new_manifest(
             "decoded_duration": None,      # 实际解码时长（秒）
             "last_cue_end": None,          # 最后一条字幕/片段结束时间
             "transcribed_end": None,       # 实际转写覆盖到的终点（秒）
-            "speech_duration": None,       # 片段累计语音时长（秒），≠ 解码时长
+            "speech_duration": None,       # 片段时间并集（兼容字段名），不是已验证语音时长
         },
         "subtitle": {
             "probe_state": "not_probed",   # found | empty | needs_auth_check | not_probed
@@ -187,6 +187,7 @@ def new_manifest(
         "verification_status": "unreviewed",
         "full_video_coverage": "uncertain",
         "coverage_basis": [],
+        "coverage_evidence": {},
         "errors": [],
         "notes": [],
     }
