@@ -100,7 +100,7 @@ def test_local_route_persists_gap_evidence(monkeypatch, tmp_path, vad, with_segm
 
     monkeypatch.setattr(workflow, "transcribe_audio", transcribe)
     result = workflow.run_ingest(url=None, media=str(source), output_dir=tmp_path / "out", vad_filter=vad)
-    man = json.loads(Path(result["manifest"]).read_text())
+    man = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
     assert seen == [vad]
     for key in ("full_video_coverage", "verification_status", "coverage_evidence", "coverage_basis", "notes"):
         assert result[key] == man[key]
@@ -212,7 +212,7 @@ def test_online_asr_route_persists_internal_gap(monkeypatch, tmp_path, vad, chun
         output_dir=tmp_path / "out",
         vad_filter=vad,
     )
-    man = json.loads(Path(result["manifest"]).read_text())
+    man = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
     assert seen == [vad]
     for key in ("full_video_coverage", "verification_status", "coverage_evidence", "coverage_basis", "notes"):
         assert result[key] == man[key]

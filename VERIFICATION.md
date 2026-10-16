@@ -16,6 +16,7 @@
 - `.venv/bin/ruff check video_ingest tests` 与 `git diff --check` 通过；CLI parser smoke 检出全部 8 个子命令。
 - 新回归覆盖：validate 不伪造核听、不降级 issues_found、manifest 与原文逐字节不变；证据沿在线/本地 ingest、validate、batch 新任务/复用路径传递；旧 supported 证据不足时报告不一致；自动 ASR 不允许通过改标志伪造完整性；长缺口阈值边界、裁剪/重叠/反向区间；分块失败保留 partial，batch 不误报全部成功；平台字幕取材 smoke。
 - 只安装 pytest 与 ruff，未运行真实 ASR 模型，未核听 973 秒现场音频，未验证真实媒体识别准确率；静音 PCM 测试的 ASR 输出仍为 mock。通过这些测试只能说明结构、状态和证据传递符合约定。
+- 首轮 GitHub CI（run 38836011143）：Ubuntu 3.11/3.12 通过；Windows 3.11/3.12 暴露测试读取 UTF-8 manifest 时使用默认 cp1252 的问题（12 个参数化用例）。已将两处读取显式设为 UTF-8；不改变生产逻辑或测试断言，修复后等待新矩阵确认。
 - 保持 Draft；本地测试通过不等于 GitHub CI 已通过，也不代表真实媒体完整性获证。
 
 ---
