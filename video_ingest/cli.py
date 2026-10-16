@@ -415,7 +415,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "resource_processing": {},
         "language_accuracy": {},
         "notes": [
-            "进程退出码 0 不等于转录完整准确；两个维度分开报告",
+            "进程退出码 0 仅表示校验通过；处理状态、时间轴证据和识别核查分别报告",
         ],
     }
 
@@ -430,6 +430,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "processing_status": man.get("processing_status"),
         "full_video_coverage": man.get("full_video_coverage"),
         "coverage_basis": man.get("coverage_basis"),
+        "coverage_evidence": man.get("coverage_evidence", {}),
+        "coverage_notes": man.get("notes", []),
         "segment_count": man.get("counts", {}).get("segment_count"),
         "chunk_count": man.get("counts", {}).get("chunk_count"),
         "consistency_problems": problems,
@@ -471,30 +473,23 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if drift > 0.05:
             problems.append("解码时长与声称时长偏差 %.1f%%" % (drift * 100))
 
-    # 语言准确性核查（抽样，不声称逐字准确）
+    # 只读报告既有核查状态；文件存在不代表已经核听。
     accuracy: dict = {
-        "status": "unreviewed",
+        "status": man.get("verification_status", "unreviewed"),
         "method": None,
-        "warning": "未做抽样核查时，不得声称字符级或逐字准确",
+        "performed_by_validate": False,
+        "warning": "本命令不核听音频；既有抽样核查也不证明逐字准确或内容完整",
     }
     raw_path = job_dir / "transcript.raw.json"
     if args.sample_check:
         audio_rel = (man.get("asr") or {}).get("audio_file")
         audio_path = job_dir / audio_rel if audio_rel else None
-        if audio_path and audio_path.exists():
-            accuracy.update(
-                status="sample_checked",
-                method="音频与转录同时存在；仅证明抽样区间可复核，不证明逐字准确",
-                audio_present=True,
-                sampled_segments=min(5, man.get("counts", {}).get("segment_count") or 0),
-            )
-        else:
-            accuracy.update(
-                status="unreviewed",
-                method="--sample-check 已请求，但音频文件已被清理或不存在",
-                audio_present=False,
-            )
-            report["notes"].append("音频缺失：无法抽样比对，保持 unreviewed")
+        accuracy.update(
+            audio_present=bool(audio_path and audio_path.is_file()),
+            sampled_segments=0,
+            method="--sample-check 仅检查核听材料是否存在，不执行抽样核听",
+        )
+        report["notes"].append("请实际核听并另行记录样本区间、发现与依据；本命令不改变核查状态")
     report["language_accuracy"] = accuracy
 
     if raw_path.exists():
@@ -505,10 +500,6 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     report["resource_processing"]["consistency_problems"] = problems
     report["ok"] = not problems
-
-    # 更新 manifest 的核查维度
-    man["verification_status"] = accuracy["status"]
-    save_manifest(job_dir, man)
 
     _print_json(report)
     return EXIT_OK if not problems else EXIT_FAILED
@@ -845,10 +836,21 @@ def cmd_batch(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001
                 existing = None
             if should_reuse(existing):
-                log("分P %d 已有完成产物，跳过（--force 可强制重跑）" % page_no)
+                reuse_problems = validate_manifest(existing)
+                log("分P %d 保留已有产物，检查一致性（--force 可强制重跑）" % page_no)
                 results.append({
-                    "page": page_no, "status": "reused", "job_id": job_id,
+                    "page": page_no,
+                    "status": "failed" if reuse_problems else "reused",
+                    "consistency_problems": reuse_problems,
+                    "job_id": job_id,
                     "processing_status": existing.get("processing_status"),
+                    "verification_status": existing.get("verification_status"),
+                    "full_video_coverage": existing.get("full_video_coverage"),
+                    "coverage_basis": existing.get("coverage_basis", []),
+                    "coverage_evidence": existing.get("coverage_evidence", {}),
+                    "notes": existing.get("notes", []),
+                    "source_type": (existing.get("subtitle") or {}).get("source_type"),
+                    "job_dir": str(job_dir.resolve()),
                     "segment_count": (existing.get("counts") or {}).get("segment_count"),
                 })
                 continue
@@ -865,9 +867,16 @@ def cmd_batch(args: argparse.Namespace) -> int:
                 vad_filter=args.vad,
             )
             results.append({
-                "page": page_no, "status": "ok", "job_id": job_id,
+                "page": page_no,
+                "status": "ok" if out.get("processing_status") == "resource_processed"
+                else out.get("processing_status", "failed"),
+                "job_id": job_id,
                 "processing_status": out.get("processing_status"),
                 "full_video_coverage": out.get("full_video_coverage"),
+                "verification_status": out.get("verification_status"),
+                "coverage_basis": out.get("coverage_basis", []),
+                "coverage_evidence": out.get("coverage_evidence", {}),
+                "notes": out.get("notes", []),
                 "segment_count": out.get("segment_count"),
                 "source_type": out.get("source_type"),
                 "job_dir": out.get("job_dir"),
@@ -1044,14 +1053,13 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--corrections", default=None, help="JSON 校正表 {错:对}")
     ing.add_argument("--prompt", default=None, help="领域提示词，提升专有名词识别率")
     ing.add_argument("--no-vad", dest="vad", action="store_false", default=True,
-                     help="关闭 VAD 静音过滤。现场演出/掌声/笑声多的音频必须关，"
-                          "否则 VAD 会误删大量语音")
+                     help="关闭 VAD 静音过滤，可用于疑似过滤问题的对照重跑；不保证识别完整或准确")
     ing.set_defaults(func=cmd_ingest)
 
     va = sub.add_parser("validate", help="区分资源处理覆盖情况与识别准确性核查")
     va.add_argument("--job-dir", required=True)
     va.add_argument("--sample-check", action="store_true",
-                    help="抽样比对音频与转录（需音频仍在），结果标为 sample_checked")
+                    help="检查核听材料是否存在；不执行核听、不更改 verification_status")
     va.set_defaults(func=cmd_validate)
 
     ch = sub.add_parser("chunks", help="按片段预算切分并做覆盖检查，不生成摘要")

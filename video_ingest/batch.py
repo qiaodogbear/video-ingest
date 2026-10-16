@@ -83,7 +83,7 @@ def summarize_batch(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
     for r in rows:
         by_status[r.get("status", "unknown")] = by_status.get(r.get("status", "unknown"), 0) + 1
 
-    failed = [r for r in rows if r.get("status") in ("failed", "blocked")]
+    failed = [r for r in rows if r.get("status") in ("failed", "blocked", "partial")]
     return {
         "requested": len(rows),
         "by_status": by_status,

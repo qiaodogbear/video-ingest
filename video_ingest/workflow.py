@@ -237,7 +237,7 @@ def run_ingest(
     # 产出 0 个片段时资源实际未被处理，必须如实记为 failed，而不是
     # resource_processed（否则会与 segment_count=0 矛盾）。
     if segments:
-        man["processing_status"] = "resource_processed"
+        man["processing_status"] = "partial" if problems else "resource_processed"
     else:
         man["processing_status"] = "failed"
         add_error(man, "normalize", "no_segments",
@@ -250,6 +250,10 @@ def run_ingest(
         "manifest": str((job_dir / "manifest.json").resolve()),
         "processing_status": man["processing_status"],
         "full_video_coverage": man["full_video_coverage"],
+        "verification_status": man["verification_status"],
+        "coverage_basis": man["coverage_basis"],
+        "coverage_evidence": man["coverage_evidence"],
+        "notes": man["notes"],
         "segment_count": len(segments),
         "chunk_count": index["chunk_count"],
         "source_type": man["subtitle"]["source_type"],
@@ -462,12 +466,11 @@ def _ingest_local_media(
     man["counts"]["chunk_count"] = index["chunk_count"]
     man["files"]["chunks_index"] = "chunks/index.json"
 
-    man["full_video_coverage"] = "supported" if segments else "uncertain"
-    add_coverage_basis(man, "输入为本地完整媒体文件，ASR 覆盖该文件全部时间轴")
+    _assess_coverage(man, segments, {}, {}, {"mode": "asr"})
     add_note(man, "本地媒体任务：无平台侧字幕信息，来源标记为 local_asr")
     # 同 bilibili 路径：有片段才算处理完成，否则如实记为 failed
     if segments:
-        man["processing_status"] = "resource_processed"
+        man["processing_status"] = "partial" if problems else "resource_processed"
     else:
         man["processing_status"] = "failed"
         add_error(man, "normalize", "no_segments",
@@ -480,6 +483,10 @@ def _ingest_local_media(
         "manifest": str((job_dir / "manifest.json").resolve()),
         "processing_status": man["processing_status"],
         "full_video_coverage": man["full_video_coverage"],
+        "verification_status": man["verification_status"],
+        "coverage_basis": man["coverage_basis"],
+        "coverage_evidence": man["coverage_evidence"],
+        "notes": man["notes"],
         "segment_count": len(segments), "chunk_count": index["chunk_count"],
         "source_type": "local_asr", "files": man["files"],
     }
@@ -536,49 +543,68 @@ def _assess_coverage(
     decoded = man["timing"].get("decoded_duration")
     last_end = man["timing"].get("last_cue_end")
 
-    if not segments:
-        man["full_video_coverage"] = "uncertain"
-        add_coverage_basis(man, "没有任何片段")
-        return
-
+    # 时间戳只能描述输出，不能独立证明所有讲话已识别；关闭 VAD 也不是证明。
+    man["full_video_coverage"] = "uncertain"
     if result.get("mode") == "asr":
-        # 注意：ASR 路径的覆盖率**不等于**"解码了多长音频"。
-        # VAD 会丢弃被判为非语音的片段，因此必须按实际转写出的语音时长来判。
-        # 实测反例：一段 973s 现场演出，开启 VAD 后只转出 778s / 357 段，
-        # 而关闭 VAD 得到 963s / 438 段——若按解码时长判，会错误地声称
-        # "覆盖完整音频"，把丢掉的内容说成完整。
-        speech = sum(s["end"] - s["start"] for s in segments) if segments else 0.0
-        covered = last_end or 0.0
-        if decoded:
-            ratio = min(1.0, covered / decoded)
-            add_coverage_basis(man, "转写覆盖到 %.1fs / 解码时长 %.1fs（%.0f%%）"
-                               % (covered, decoded, ratio * 100))
-            add_coverage_basis(man, "其中实际语音 %.1fs（占解码时长 %.0f%%）"
-                               % (speech, 100 * speech / decoded))
-        man["timing"]["transcribed_end"] = round(covered, 2)
-        man["timing"]["speech_duration"] = round(speech, 2)
+        import math
 
-        if claimed and decoded:
-            drift = abs(decoded - claimed) / claimed
-            add_coverage_basis(man, "解码时长与平台声称时长偏差 %.1f%%" % (drift * 100))
-        else:
-            drift = 0.0
-
-        # 转写终点明显短于解码时长 → 有片段未进入转录，覆盖率只能算 uncertain
-        tail_gap = (decoded - covered) if decoded else 0.0
-        if tail_gap > max(30.0, 0.05 * decoded):
-            man["full_video_coverage"] = "uncertain"
-            add_coverage_basis(man, "末尾有 %.0fs 未产生任何片段（可能是静音/掌声，"
-                                    "也可能是 VAD 过滤或识别失败），无法确认为完整覆盖" % tail_gap)
-            if not man.get("asr", {}).get("vad_filter", True):
-                add_note(man, "警示：已关闭 VAD 仍有 %.0fs 未覆盖，建议核查该段音频" % tail_gap)
+        duration_known = isinstance(decoded, (int, float)) and math.isfinite(decoded) and decoded > 0
+        intervals = []
+        for seg in segments:
+            start, end = float(seg["start"]), float(seg["end"])
+            if not math.isfinite(start) or not math.isfinite(end):
+                continue
+            start = max(0.0, start)
+            if duration_known:
+                end = min(decoded, end)
+            if end > start:
+                intervals.append((start, end))
+        merged: list[list[float]] = []
+        for start, end in sorted(intervals):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
             else:
-                add_note(man, "警示：VAD 已开启且末尾 %.0fs 未覆盖。"
-                              "现场演出/掌声多的音频建议改用 --no-vad" % tail_gap)
-        elif drift > 0.05:
-            man["full_video_coverage"] = "uncertain"
-        else:
-            man["full_video_coverage"] = "supported"
+                merged.append([start, end])
+        speech = sum(end - start for start, end in merged)
+        covered = merged[-1][1] if merged else 0.0
+        gaps = []
+        cursor = 0.0
+        for start, end in merged:
+            if start > cursor:
+                gaps.append({"start": cursor, "end": start, "duration": start - cursor,
+                             "position": "leading" if cursor == 0 else "internal"})
+            cursor = end
+        if duration_known and cursor < decoded:
+            gaps.append({"start": cursor, "end": decoded, "duration": decoded - cursor,
+                         "position": "trailing" if merged else "entire"})
+        threshold = max(30.0, 0.05 * decoded) if duration_known else None
+        drift = abs(decoded - claimed) / claimed if duration_known and claimed and claimed > 0 else None
+        man["timing"].update(transcribed_end=round(covered, 2), speech_duration=round(speech, 2))
+        man["coverage_evidence"] = {
+            "method": "asr_timestamp_union_v1",
+            "decoded_duration": decoded, "claimed_duration": claimed,
+            "duration_drift_ratio": drift,
+            "vad_filter": man.get("asr", {}).get("vad_filter"),
+            "segment_interval_duration": speech,
+            "segment_interval_ratio": speech / decoded if duration_known else None,
+            "gaps": gaps, "long_gap_threshold_seconds": threshold,
+            "speech_completeness_verified": False,
+        }
+        add_coverage_basis(man, "ASR 片段时间并集 %.1fs，终点 %.1fs；这不是实际语音时长或识别准确率" % (speech, covered))
+        add_coverage_basis(man, "解码时长=%s，声称时长=%s，偏差比例=%s；VAD=%s" % (
+            decoded, claimed, drift, man.get("asr", {}).get("vad_filter")))
+        add_coverage_basis(man, "仅有时间戳与时长证据，无法证明全部讲话已转录；无片段时段可能为真实静音、音乐、VAD 过滤或识别失败")
+        if not segments:
+            add_coverage_basis(man, "没有任何片段；不能据此确认存在漏转语音")
+        if not duration_known:
+            add_note(man, "警示：缺少有效解码时长，无法核查完整时间轴或尾部缺口")
+        for gap in gaps:
+            if threshold is not None and gap["duration"] > threshold:
+                add_note(man, "警示：%s %.2f–%.2fs 未产生片段（%.2fs），原因未核实；请核听该时段。%s" % (
+                    gap["position"], gap["start"], gap["end"], gap["duration"],
+                    "VAD 已开启，可用 --no-vad 对照重跑；重跑不等于准确性验证。"
+                    if man.get("asr", {}).get("vad_filter") is True
+                    else "关闭 VAD 也不能保证全部讲话被识别。"))
     else:
         add_coverage_basis(man, "使用平台字幕，仅证明下载了该字幕文件")
         if claimed and last_end:

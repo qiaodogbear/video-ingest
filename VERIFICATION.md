@@ -1,10 +1,23 @@
 # 交付与验收报告
 
-日期：2026-10（本机实测）
+日期：2026-10（历史本机实测；当前 PR 复核见下节）
 对应任务书：`local_video_agent_bootstrap.md`
 
 **重要区分**：本报告严格区分「已验证」「已实现但未实网验证」「仅设计」三类。
 不得把可执行示例、第三方宣称或单元测试通过，写成"某个视频已成功转录"。
+
+## PR #1 覆盖语义复核（2026-10-16）
+
+本节是本次云端 Linux / Python 3.12.14 的实际复核；以下旧章节保留历史记录。旧记录中的 `supported` 是旧门禁的输出，不构成当前标准下的讲话完整性证据，也不表示本次重新核听过该媒体。旧测试数量、旧 CI 结果同样是历史记录。
+
+- 原分支基线（8050d5f）独立复跑：`python -m pytest tests -q -o addopts=''`，194 passed；原新增 24 项为 mock ASR/参数传递测试。
+- 提交前发现远端推进到 c71338c，已先快进并保留其全部测试、文档和更严格的自动 ASR 门禁，再叠加本次修正；未强推。
+- 修正后运行 `.venv/bin/python -m pytest tests -q -o addopts=''`：257 passed（相对原 194 项新增 63 项；包含并保留并发提交 c71338c 的 20 项，本次再增加 43 项）。
+- `.venv/bin/ruff check video_ingest tests` 与 `git diff --check` 通过；CLI parser smoke 检出全部 8 个子命令。
+- 新回归覆盖：validate 不伪造核听、不降级 issues_found、manifest 与原文逐字节不变；证据沿在线/本地 ingest、validate、batch 新任务/复用路径传递；旧 supported 证据不足时报告不一致；自动 ASR 不允许通过改标志伪造完整性；长缺口阈值边界、裁剪/重叠/反向区间；分块失败保留 partial，batch 不误报全部成功；平台字幕取材 smoke。
+- 只安装 pytest 与 ruff，未运行真实 ASR 模型，未核听 973 秒现场音频，未验证真实媒体识别准确率；静音 PCM 测试的 ASR 输出仍为 mock。通过这些测试只能说明结构、状态和证据传递符合约定。
+- 首轮 GitHub CI（run 38836011143）：Ubuntu 3.11/3.12 通过；Windows 3.11/3.12 暴露测试读取 UTF-8 manifest 时使用默认 cp1252 的问题（12 个参数化用例）。已将两处读取显式设为 UTF-8；不改变生产逻辑或测试断言，修复后等待新矩阵确认。
+- 保持 Draft；本地测试通过不等于 GitHub CI 已通过，也不代表真实媒体完整性获证。
 
 ---
 

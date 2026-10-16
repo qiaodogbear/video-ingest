@@ -98,13 +98,38 @@ Test-Path "$TOOL\.venv\Scripts\python.exe"
 & .\.venv\Scripts\python.exe -m video_ingest validate --job-dir ".\output\<job-id>"
 ```
 
-必须读这两个维度，它们**含义不同**：
+必须读以下三个维度，它们**含义不同**：
 
 - `processing_status`：`resource_processed` / `partial` / `blocked` / `failed`
 - `verification_status`：`unreviewed` / `sample_checked` / `issues_found`
-- `full_video_coverage`：`supported` / `uncertain` / `partial`，附 `coverage_basis`
+- `full_video_coverage`：`supported` / `uncertain` / `partial`，附 `coverage_basis` 与 `coverage_evidence`
 
 **拿到整个字幕文件只证明下载了这个文件，不证明它覆盖视频里所有讲话**（片头片尾、无声演示都会造成空档）。所以字幕路线的覆盖率默认是 `uncertain`。
+
+自动 ASR 同样默认 `uncertain`；处理成功、解码完整、关闭 VAD、片段密集或
+分块无遗漏均不能证明全部讲话已转录。`uncertain` 表示证据不足，不能直接说
+“已漏转”；`partial` 表示已有证据确认材料只取得一部分，需写明缺什么。
+
+读取 `validate.resource_processing` 的 `coverage_evidence`、`coverage_basis`、
+`coverage_notes`；旧 ASR 任务缺少证据或仍标 `supported` 时，先重新评估，
+不能直接复用旧完整性结论。`segment_interval_duration` 与兼容字段
+`timing.speech_duration` 都是片段时间并集；`segment_interval_ratio` 不是语音占比
+或识别准确率。解码时长未知时，比例和尾部缺口无法确定，不能解释为空缺口已验证。
+
+按 `gaps` 的首部、中段、尾部时间定位原音频核听。超过
+`max(30s, 5% 解码时长)` 仅触发核听提示；阈值以内的缺口仍可能含漏转。
+静音、音乐、掌声、VAD 过滤、识别失败在核听前都只是候选原因。
+可用 `--no-vad` 在独立输出目录对照重跑，保留两次原音频、原始转录、manifest
+及参数；更长转录不等于更准确，也不能自动升级覆盖或核查状态。
+
+`validate --sample-check` 只检查音频是否可供复核，不执行核听；文件存在不能
+证明 `sample_checked`。读取 `language_accuracy.status`，已有 `issues_found`
+不得被校验命令清除。人工核查记录应注明文件/哈希、时间区间、片段 ID、
+听到的内容与结论；抽样核听仍不能证明全片完整或逐字准确。
+校正只写独立层，原始转录与证据保留。未核听时输出例如：
+“警示：仅依据自动 ASR，讲话完整性未核实；5–95 秒未产生片段，原因待核听。”
+
+处理成功且 `uncertain` 时，可以基于已取得材料做有明确限制的分析，不应当作处理失败或反复重跑直到 `supported`。没有长缺口或时间并集达到 100% 也不能证明讲话完整。分块 `complete` 只保证已提取片段全部入块，不保证原视频全部讲话已提取。
 
 ### 6. 逐块阅读（**不要跳这一步**）
 

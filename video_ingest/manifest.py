@@ -115,7 +115,7 @@ def new_manifest(
             "decoded_duration": None,      # 实际解码时长（秒）
             "last_cue_end": None,          # 最后一条字幕/片段结束时间
             "transcribed_end": None,       # 实际转写覆盖到的终点（秒）
-            "speech_duration": None,       # 片段累计语音时长（秒），≠ 解码时长
+            "speech_duration": None,       # 片段时间并集（兼容字段名），不是已验证语音时长
         },
         "subtitle": {
             "probe_state": "not_probed",   # found | empty | needs_auth_check | not_probed
@@ -187,6 +187,7 @@ def new_manifest(
         "verification_status": "unreviewed",
         "full_video_coverage": "uncertain",
         "coverage_basis": [],
+        "coverage_evidence": {},
         "errors": [],
         "notes": [],
     }
@@ -267,8 +268,21 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     if manifest.get("asr", {}).get("used") and src == "platform_manual":
         problems.append("asr.used=true 但来源标为 platform_manual，来源标记矛盾")
 
+    evidence = manifest.get("coverage_evidence", {})
+    if not isinstance(evidence, dict):
+        problems.append("coverage_evidence 必须为对象")
+        evidence = {}
+
     # 语言不符是"内容不可信"级别的信号，必须体现为 issue，不能停留在 unreviewed。
     asr = manifest.get("asr") or {}
+    if asr.get("used") or src == "local_asr":
+        if cov == "supported":
+            problems.append("自动 ASR 不能仅凭时间戳或时长标为 supported；需重新评估为 uncertain")
+        if not evidence and (cov == "supported" or ps == "resource_processed"
+                             or manifest.get("counts", {}).get("segment_count")):
+            problems.append("ASR 缺少 coverage_evidence；旧任务需重新评估，不能据旧状态主张完整")
+        elif evidence and evidence.get("speech_completeness_verified") is not False:
+            problems.append("自动 ASR coverage_evidence 不得声称 speech_completeness_verified")
     if asr.get("language_mismatch"):
         if manifest.get("verification_status") == "unreviewed":
             problems.append(

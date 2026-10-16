@@ -221,7 +221,7 @@ Skill 目录本身不含绝对路径，但有这一处需要你按实际位置�
      needs_auth_check   → 未提供 cookie，不得断言"没有字幕"
 3. ingest 取材。不确定语言时用 --language auto。
 4. validate 读三个字段：processing_status / verification_status /
-   full_video_coverage（含 coverage_basis）。consistency_problems 非空必须先处理。
+   full_video_coverage（含 coverage_basis 与 coverage_evidence）。consistency_problems 非空必须先处理。
 5. chunks 后逐块阅读，每块写证据笔记，每个结论能定位到片段 ID。
 6. 若口播不足以理解（教程、演示、含提示词），执行 frames 取画面帧，
    必要时再执行 ocr。读视觉证据时：
@@ -247,8 +247,17 @@ Skill 目录本身不含绝对路径，但有这一处需要你按实际位置�
 ```bash
 video-ingest ingest --url "<URL>" --output-dir ./output
 # → {"ok": true, "job_dir": "...", "processing_status": "resource_processed",
-#    "full_video_coverage": "supported", "segment_count": 71, ...}
+#    "full_video_coverage": "uncertain", "segment_count": 71, ...}
 ```
+
+`ok=true` / `resource_processed` 只说明资源处理完成；自动 ASR 默认
+`full_video_coverage=uncertain`，即使关闭 VAD、片段密集或时长吻合。
+用 `validate` 查看 `resource_processing.coverage_evidence`、`coverage_basis` 和
+`coverage_notes`；`language_accuracy.status` 报告已有核查状态。
+`--sample-check` 仅检查音频是否可供复核，不执行核听、不升级核查状态。
+`validate` 的 `ok=true` 仅表示一致性检查通过，不证明语音完整或逐字准确。
+片段时间并集比例不是识别准确率，缺口也不是已确认漏转；详见 SOP 覆盖门禁。
+`chunks` 的覆盖完整只表示已有片段均被分块，不证明原音频全部讲话被识别。
 
 退出码：`0` 成功 / `2` 用法或输入错误 / `3` 被阻断（需登录、限流）/
 `4` 失败。**结果 JSON 仍会输出**，便于区分"失败原因"与"调用方式错误"。
