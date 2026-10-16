@@ -430,6 +430,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         "processing_status": man.get("processing_status"),
         "full_video_coverage": man.get("full_video_coverage"),
         "coverage_basis": man.get("coverage_basis"),
+        "coverage_evidence": man.get("coverage_evidence", {}),
+        "coverage_notes": man.get("notes", []),
         "segment_count": man.get("counts", {}).get("segment_count"),
         "chunk_count": man.get("counts", {}).get("chunk_count"),
         "consistency_problems": problems,
@@ -473,7 +475,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     # 语言准确性核查（抽样，不声称逐字准确）
     accuracy: dict = {
-        "status": "unreviewed",
+        "status": man.get("verification_status", "unreviewed"),
         "method": None,
         "warning": "未做抽样核查时，不得声称字符级或逐字准确",
     }
@@ -483,18 +485,16 @@ def cmd_validate(args: argparse.Namespace) -> int:
         audio_path = job_dir / audio_rel if audio_rel else None
         if audio_path and audio_path.exists():
             accuracy.update(
-                status="sample_checked",
-                method="音频与转录同时存在；仅证明抽样区间可复核，不证明逐字准确",
+                method="音频存在，可供人工核听；本命令未核听，不升级核查状态",
                 audio_present=True,
-                sampled_segments=min(5, man.get("counts", {}).get("segment_count") or 0),
+                sampled_segments=0,
             )
         else:
             accuracy.update(
-                status="unreviewed",
                 method="--sample-check 已请求，但音频文件已被清理或不存在",
                 audio_present=False,
             )
-            report["notes"].append("音频缺失：无法抽样比对，保持 unreviewed")
+            report["notes"].append("音频缺失：无法抽样比对，保留已有核查状态")
     report["language_accuracy"] = accuracy
 
     if raw_path.exists():
@@ -506,9 +506,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     report["resource_processing"]["consistency_problems"] = problems
     report["ok"] = not problems
 
-    # 更新 manifest 的核查维度
-    man["verification_status"] = accuracy["status"]
-    save_manifest(job_dir, man)
+    # validate 只报告已有证据；文件存在性不能代替核听，也不能降级已有核查状态。
 
     _print_json(report)
     return EXIT_OK if not problems else EXIT_FAILED
@@ -1051,7 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
     va = sub.add_parser("validate", help="区分资源处理覆盖情况与识别准确性核查")
     va.add_argument("--job-dir", required=True)
     va.add_argument("--sample-check", action="store_true",
-                    help="抽样比对音频与转录（需音频仍在），结果标为 sample_checked")
+                    help="检查音频是否可供人工抽样复核；不执行核听，不升级核查状态")
     va.set_defaults(func=cmd_validate)
 
     ch = sub.add_parser("chunks", help="按片段预算切分并做覆盖检查，不生成摘要")

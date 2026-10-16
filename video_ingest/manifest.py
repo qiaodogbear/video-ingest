@@ -270,6 +270,15 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
 
     # 语言不符是"内容不可信"级别的信号，必须体现为 issue，不能停留在 unreviewed。
     asr = manifest.get("asr") or {}
+    if asr.get("used") or src == "local_asr":
+        evidence = manifest.get("coverage_evidence") or {}
+        if cov == "supported":
+            problems.append("自动 ASR 不能仅凭时间戳或时长标为 supported；需重新评估为 uncertain")
+        if not evidence and (cov == "supported" or ps == "resource_processed"
+                             or manifest.get("counts", {}).get("segment_count")):
+            problems.append("ASR 缺少 coverage_evidence；旧任务需重新评估，不能据旧状态主张完整")
+        elif evidence and evidence.get("speech_completeness_verified") is not False:
+            problems.append("自动 ASR coverage_evidence 不得声称 speech_completeness_verified")
     if asr.get("language_mismatch"):
         if manifest.get("verification_status") == "unreviewed":
             problems.append(

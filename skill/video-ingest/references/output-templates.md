@@ -11,6 +11,9 @@
 - 本地 ASR：模型 <model>，设备 <cpu/cuda>，语言检测 <x> (prob <p>)
 - 元信息与简介：作为辅助，不视为全文
 - 校正：应用 <n> 条，见 corrections.json（原文层未被覆盖）
+- 处理与核查：processing_status = <...>，verification_status = <...>
+- 时间轴证据：片段时间并集 <秒/比例，非准确率>，缺口 <起止/原因未核实>
+- 核听记录：<文件/哈希、时间区间、片段 ID、发现；未核听则写未核听>
 - 覆盖判定：full_video_coverage = <supported/uncertain/partial>，依据 <...>
 ```
 
