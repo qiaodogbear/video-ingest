@@ -66,7 +66,10 @@ def test_dense_timestamps_or_missing_duration_do_not_prove_completeness(decoded,
 
 @pytest.mark.parametrize("vad", [True, False])
 @pytest.mark.parametrize("with_segments", [False, True])
-def test_local_route_persists_gap_evidence(monkeypatch, tmp_path, vad, with_segments):
+@pytest.mark.parametrize("chunk_problem", [False, True])
+def test_local_route_persists_gap_evidence(monkeypatch, tmp_path, vad, with_segments, chunk_problem):
+    if chunk_problem:
+        monkeypatch.setattr(workflow, "validate_coverage", lambda _: ["missing segment"])
     source = tmp_path / "silence.wav"
     # 合成真实零值 PCM；不运行模型，mock 输出不能证明它识别正确。
     import wave
@@ -99,7 +102,9 @@ def test_local_route_persists_gap_evidence(monkeypatch, tmp_path, vad, with_segm
     result = workflow.run_ingest(url=None, media=str(source), output_dir=tmp_path / "out", vad_filter=vad)
     man = json.loads(Path(result["manifest"]).read_text())
     assert seen == [vad]
-    assert result["processing_status"] == ("resource_processed" if with_segments else "failed")
+    for key in ("full_video_coverage", "verification_status", "coverage_evidence", "coverage_basis", "notes"):
+        assert result[key] == man[key]
+    assert result["processing_status"] == (("partial" if chunk_problem else "resource_processed") if with_segments else "failed")
     assert man["full_video_coverage"] == "uncertain"
     assert man["coverage_evidence"]["gaps"][0]["position"] == ("trailing" if with_segments else "entire")
     assert man["asr"]["vad_filter"] is vad
@@ -155,7 +160,10 @@ def test_backend_receives_vad(monkeypatch, vad):
 
 
 @pytest.mark.parametrize("vad", [True, False])
-def test_online_asr_route_persists_internal_gap(monkeypatch, tmp_path, vad):
+@pytest.mark.parametrize("chunk_problem", [False, True])
+def test_online_asr_route_persists_internal_gap(monkeypatch, tmp_path, vad, chunk_problem):
+    if chunk_problem:
+        monkeypatch.setattr(workflow, "validate_coverage", lambda _: ["missing segment"])
     audio = tmp_path / "mock.wav"
     audio.write_bytes(b"mock audio")
     monkeypatch.setattr(workflow, "build_opener", lambda _: None)
@@ -206,13 +214,177 @@ def test_online_asr_route_persists_internal_gap(monkeypatch, tmp_path, vad):
     )
     man = json.loads(Path(result["manifest"]).read_text())
     assert seen == [vad]
-    assert result["processing_status"] == "resource_processed"
+    for key in ("full_video_coverage", "verification_status", "coverage_evidence", "coverage_basis", "notes"):
+        assert result[key] == man[key]
+    assert result["processing_status"] == ("partial" if chunk_problem else "resource_processed")
     assert result["full_video_coverage"] == "uncertain"
     assert man["timing"]["speech_duration"] == 10
     assert man["coverage_evidence"]["gaps"] == [
         {"start": 5, "end": 95, "duration": 90, "position": "internal"}
     ]
     assert validate_manifest(man) == []
+
+
+@pytest.mark.parametrize("sample_check", [False, True])
+@pytest.mark.parametrize("status", ["unreviewed", "sample_checked", "issues_found"])
+@pytest.mark.parametrize("audio_present", [False, True])
+def test_validate_is_read_only_and_never_invents_review(tmp_path, capsys, sample_check, status, audio_present):
+    from video_ingest.manifest import save_manifest
+
+    man = manifest()
+    man.update(verification_status=status, processing_status="resource_processed")
+    man["counts"]["segment_count"] = 1
+    man["timing"]["decoded_duration"] = 100
+    workflow._assess_coverage(man, [{"start": 0, "end": 5}], {}, {}, {"mode": "asr"})
+    man["asr"]["audio_file"] = "audio.wav"
+    if status == "issues_found":
+        man["asr"]["language_mismatch"] = True
+        man["notes"].append({"note": "语言不符，需核听"})
+    if audio_present:
+        (tmp_path / "audio.wav").write_bytes(b"unreviewed audio")
+    (tmp_path / "chunks").mkdir()
+    (tmp_path / "chunks/index.json").write_text(json.dumps({"coverage": {"complete": True}}))
+    for name in ("transcript.raw.json", "transcript.txt", "transcript.srt"):
+        (tmp_path / name).write_text("原始证据，不能改变", encoding="utf-8")
+    save_manifest(tmp_path, man)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    assert cli.cmd_validate(SimpleNamespace(job_dir=str(tmp_path), sample_check=sample_check)) == cli.EXIT_OK
+    report = json.loads(capsys.readouterr().out)
+    assert report["language_accuracy"]["status"] == status
+    assert report["language_accuracy"]["performed_by_validate"] is False
+    assert report["language_accuracy"].get("sampled_segments", 0) == 0
+    assert report["resource_processing"]["coverage_evidence"] == man["coverage_evidence"]
+    assert report["resource_processing"]["full_video_coverage"] == "uncertain"
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("flag", [None, False, "true", 1])
+def test_supported_rejects_timestamp_only_or_nonboolean_completeness(flag):
+    man = manifest()
+    man.update(full_video_coverage="supported", coverage_basis=["时间轴密集、时长吻合、关闭 VAD"])
+    man["coverage_evidence"] = {"method": "asr_timestamp_union_v1", "speech_completeness_verified": flag}
+    assert any("supported" in p for p in validate_manifest(man))
+
+
+
+@pytest.mark.parametrize("duration,gap,warn", [(100, 30, False), (100, 30.01, True), (1000, 50, False), (1000, 50.01, True)])
+def test_long_gap_threshold_is_strictly_exceeded(duration, gap, warn):
+    man = manifest()
+    man["timing"]["decoded_duration"] = duration
+    workflow._assess_coverage(man, [{"start": gap, "end": duration}], {}, {}, {"mode": "asr"})
+    assert any("请核听该时段" in n["note"] for n in man["notes"]) is warn
+    assert man["full_video_coverage"] == "uncertain"
+    assert man["verification_status"] == "unreviewed"
+
+
+def test_intervals_are_clipped_merged_and_do_not_mutate_raw_evidence():
+    import copy
+
+    man = manifest()
+    man["timing"]["decoded_duration"] = 100
+    segments = [{"start": a, "end": b} for a, b in [(90, 120), (-10, 20), (20, 30), (10, 25), (50, 50), (80, 70), (110, 130)]]
+    before = copy.deepcopy(segments)
+    workflow._assess_coverage(man, segments, {}, {}, {"mode": "asr"})
+    assert segments == before
+    assert man["coverage_evidence"]["segment_interval_duration"] == 40
+    assert man["coverage_evidence"]["segment_interval_ratio"] == 0.4
+    assert man["coverage_evidence"]["gaps"] == [{"start": 30, "end": 90, "duration": 60, "position": "internal"}]
+
+
+@pytest.mark.parametrize("processing", ["resource_processed", "partial", "failed", "blocked"])
+def test_batch_propagates_processing_failures(monkeypatch, tmp_path, capsys, processing):
+    monkeypatch.setattr(cli, "build_opener", lambda _: None)
+    monkeypatch.setattr(cli, "fetch_video_info", lambda *a: {"bvid": "BV1xx411c7mD", "pages": [{"page": 1}]})
+    evidence = {"speech_completeness_verified": False}
+    monkeypatch.setattr(cli, "run_ingest", lambda **kw: {
+        "processing_status": processing, "full_video_coverage": "uncertain",
+        "verification_status": "issues_found", "coverage_evidence": evidence,
+        "coverage_basis": ["时间轴不足以证明完整"], "notes": [{"note": "警示：待核听"}],
+    })
+    args = cli.build_parser().parse_args(["batch", "--url", "https://www.bilibili.com/video/BV1xx411c7mD", "--pages", "1", "--force", "--output-dir", str(tmp_path)])
+    code = args.func(args)
+    report = json.loads(capsys.readouterr().out)
+    assert (code == cli.EXIT_OK) is (processing == "resource_processed")
+    assert report["ok"] is (processing == "resource_processed")
+    assert report["results"][0]["coverage_evidence"] == evidence
+    assert report["results"][0]["verification_status"] == "issues_found"
+
+
+@pytest.mark.parametrize("legacy_supported", [False, True])
+def test_batch_reuse_keeps_evidence_and_surfaces_legacy_inconsistency(monkeypatch, tmp_path, capsys, legacy_supported):
+    from video_ingest.manifest import make_job_id, save_manifest
+
+    monkeypatch.setattr(cli, "build_opener", lambda _: None)
+    monkeypatch.setattr(cli, "fetch_video_info", lambda *a: {"bvid": "BV1xx411c7mD", "pages": [{"page": 1}]})
+    monkeypatch.setattr(cli, "run_ingest", lambda **kw: pytest.fail("reused artifacts must not be overwritten"))
+    job = tmp_path / make_job_id("bilibili", "BV1xx411c7mD", 1)
+    job.mkdir()
+    man = manifest()
+    man.update(processing_status="resource_processed", verification_status="issues_found")
+    man["counts"]["segment_count"] = 1
+    man["timing"]["decoded_duration"] = 100
+    workflow._assess_coverage(man, [{"start": 0, "end": 100}], {}, {}, {"mode": "asr"})
+    if legacy_supported:
+        man["full_video_coverage"] = "supported"
+        man["coverage_evidence"] = {}
+    save_manifest(job, man)
+    before = (job / "manifest.json").read_bytes()
+    args = cli.build_parser().parse_args(["batch", "--url", "https://www.bilibili.com/video/BV1xx411c7mD", "--pages", "1", "--output-dir", str(tmp_path)])
+    code = args.func(args)
+    row = json.loads(capsys.readouterr().out)["results"][0]
+    assert row["coverage_evidence"] == man["coverage_evidence"]
+    assert row["coverage_basis"] == man["coverage_basis"]
+    assert row["notes"] == man["notes"]
+    assert row["verification_status"] == "issues_found"
+    assert row["full_video_coverage"] == man["full_video_coverage"]
+    assert (code == cli.EXIT_OK) is (not legacy_supported)
+    assert bool(row["consistency_problems"]) is legacy_supported
+    assert (job / "manifest.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("evidence,status", [
+    ({"speech_completeness_verified": True, "method": "asr_timestamp_union_v1"}, "sample_checked"),
+    ({"speech_completeness_verified": True, "method": "independent_full_audio_review"}, "unreviewed"),
+    ({"speech_completeness_verified": True}, "sample_checked"),
+    ("not an evidence object", "sample_checked"),
+])
+def test_supported_cannot_be_unlocked_by_flag_alone(evidence, status):
+    man = manifest()
+    man.update(full_video_coverage="supported", verification_status=status,
+               coverage_basis=["时间轴密集"], coverage_evidence=evidence)
+    assert any("supported" in p for p in validate_manifest(man))
+
+
+def test_platform_subtitle_acquisition_stays_uncertain(monkeypatch, tmp_path):
+    source = tmp_path / "sample.srt"
+    source.write_text("1\n00:00:00,000 --> 00:00:05,000\n测试字幕\n", encoding="utf-8")
+    monkeypatch.setattr(workflow, "probe_player_subtitles", lambda *a: {
+        "language_keys": [{"lan": "zh", "subtitle_url": "https://example.invalid/subtitle"}]})
+    monkeypatch.setattr(workflow, "probe_ytdlp_subtitles", lambda *a, **kw: {})
+    monkeypatch.setattr(workflow, "download_subtitle", lambda *a: source)
+    man = manifest()
+    man["asr"]["used"] = False
+    man["timing"]["claimed_duration"] = 100
+    result = workflow._acquire_transcript(
+        man=man, job_dir=tmp_path, opener=None, info={"bvid": "BV1xx411c7mD"},
+        page={"cid": 1}, norm={"canonical_url": "https://www.bilibili.com/video/BV1xx411c7mD"},
+        url="https://www.bilibili.com/video/BV1xx411c7mD", language="zh", model="mock",
+        device="cpu", compute_type="int8", cookies_file=None, force_asr=False,
+        corrections={}, initial_prompt=None, log=lambda _: None,
+    )
+    workflow._assess_coverage(man, result["segments"], {}, {}, result)
+    assert result["mode"] == "subtitle"
+    assert len(result["segments"]) == 1
+    assert man["processing_status"] == "resource_processed"
+    assert man["full_video_coverage"] == "uncertain"
+    assert man["verification_status"] == "unreviewed"
+
+
+@pytest.mark.parametrize("evidence", [[], "", False, 0, None])
+def test_falsey_malformed_evidence_is_reported(evidence):
+    man = manifest()
+    man["coverage_evidence"] = evidence
+    assert "coverage_evidence 必须为对象" in validate_manifest(man)
 
 
 @pytest.mark.parametrize("status", ["unreviewed", "sample_checked", "issues_found"])

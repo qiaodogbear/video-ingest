@@ -237,7 +237,7 @@ def run_ingest(
     # 产出 0 个片段时资源实际未被处理，必须如实记为 failed，而不是
     # resource_processed（否则会与 segment_count=0 矛盾）。
     if segments:
-        man["processing_status"] = "resource_processed"
+        man["processing_status"] = "partial" if problems else "resource_processed"
     else:
         man["processing_status"] = "failed"
         add_error(man, "normalize", "no_segments",
@@ -250,6 +250,10 @@ def run_ingest(
         "manifest": str((job_dir / "manifest.json").resolve()),
         "processing_status": man["processing_status"],
         "full_video_coverage": man["full_video_coverage"],
+        "verification_status": man["verification_status"],
+        "coverage_basis": man["coverage_basis"],
+        "coverage_evidence": man["coverage_evidence"],
+        "notes": man["notes"],
         "segment_count": len(segments),
         "chunk_count": index["chunk_count"],
         "source_type": man["subtitle"]["source_type"],
@@ -466,7 +470,7 @@ def _ingest_local_media(
     add_note(man, "本地媒体任务：无平台侧字幕信息，来源标记为 local_asr")
     # 同 bilibili 路径：有片段才算处理完成，否则如实记为 failed
     if segments:
-        man["processing_status"] = "resource_processed"
+        man["processing_status"] = "partial" if problems else "resource_processed"
     else:
         man["processing_status"] = "failed"
         add_error(man, "normalize", "no_segments",
@@ -479,6 +483,10 @@ def _ingest_local_media(
         "manifest": str((job_dir / "manifest.json").resolve()),
         "processing_status": man["processing_status"],
         "full_video_coverage": man["full_video_coverage"],
+        "verification_status": man["verification_status"],
+        "coverage_basis": man["coverage_basis"],
+        "coverage_evidence": man["coverage_evidence"],
+        "notes": man["notes"],
         "segment_count": len(segments), "chunk_count": index["chunk_count"],
         "source_type": "local_asr", "files": man["files"],
     }

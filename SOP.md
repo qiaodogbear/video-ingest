@@ -289,7 +289,9 @@ prob=1.000**，所以"比对 transcribe 返回的检测语言"这种做法**完�
 
 ASR 在线和本地路径共用门禁。`coverage_evidence` 记录时间并集、缺口位置与时长、VAD、时长偏差；长缺口阈值为 max(30s, 5% 解码时长)，仅用于提示核查。无片段时段不能直接认定为漏转。`timing.speech_duration` 为兼容字段名，表示片段时间并集，非真实语音时长。
 
-`validate` 只报告已有核查状态，不因文件存在或 `--sample-check` 升级为 `sample_checked`，也不清除 `issues_found`。人工核听须另记文件/哈希、区间、片段 ID 与发现；抽样不证明全片完整。
+`processing_status` 只表示资源处理；时间轴证据不等于讲话完整性或识别准确性。当前自动 ASR 不支持通过人工修改字段升级为 `supported`，需要独立核听并记录发现，不能篡改自动证据。
+
+`validate` 是只读检查，保留 manifest 和原文。它只报告已有核查状态，不因文件存在或 `--sample-check` 升级为 `sample_checked`，也不清除 `issues_found`。人工核听须另记文件/哈希、区间、片段 ID 与发现；抽样不证明全片完整。
 
 单元测试验证门禁与参数传递，不验证真实媒体识别准确性；后者需核听原音频并对照转录。
 

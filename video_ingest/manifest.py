@@ -268,10 +268,14 @@ def validate_manifest(manifest: dict[str, Any]) -> list[str]:
     if manifest.get("asr", {}).get("used") and src == "platform_manual":
         problems.append("asr.used=true 但来源标为 platform_manual，来源标记矛盾")
 
+    evidence = manifest.get("coverage_evidence", {})
+    if not isinstance(evidence, dict):
+        problems.append("coverage_evidence 必须为对象")
+        evidence = {}
+
     # 语言不符是"内容不可信"级别的信号，必须体现为 issue，不能停留在 unreviewed。
     asr = manifest.get("asr") or {}
     if asr.get("used") or src == "local_asr":
-        evidence = manifest.get("coverage_evidence") or {}
         if cov == "supported":
             problems.append("自动 ASR 不能仅凭时间戳或时长标为 supported；需重新评估为 uncertain")
         if not evidence and (cov == "supported" or ps == "resource_processed"
